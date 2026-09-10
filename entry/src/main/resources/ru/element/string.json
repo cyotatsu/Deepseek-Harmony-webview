@@ -37,10 +37,6 @@
       "value": "Файл"
     },
     {
-      "name": "upload_hint",
-      "value": "ⓘ Распознаётся только текст с изображений"
-    },
-    {
       "name": "share_description",
       "value": "Поделиться из DeepSeek"
     },
@@ -53,16 +49,32 @@
       "value": "Не удалось открыть внешнюю ссылку"
     },
     {
-      "name": "toast_download_done",
-      "value": "Загрузка завершена"
-    },
-    {
       "name": "toast_download_fail",
       "value": "Ошибка загрузки"
     },
     {
       "name": "toast_save_done",
       "value": "Сохранено в Загрузки"
+    },
+    {
+      "name": "module_desc",
+      "value": "DeepSeek AI для HarmonyOS"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "DeepSeek Main Entry"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "DeepSeek"
+    },
+    {
+      "name": "internet_reason",
+      "value": "Требуется доступ к сети для загрузки сервиса DeepSeek AI"
+    },
+    {
+      "name": "network_info_reason",
+      "value": "Используется для проверки состояния сети и более понятных сообщений об ошибках"
     }
   ]
 }

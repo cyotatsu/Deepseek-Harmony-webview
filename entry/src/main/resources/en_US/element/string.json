@@ -37,10 +37,6 @@
       "value": "File"
     },
     {
-      "name": "upload_hint",
-      "value": "ⓘ Only text from images will be recognized"
-    },
-    {
       "name": "share_description",
       "value": "Shared from DeepSeek"
     },
@@ -53,16 +49,32 @@
       "value": "Unable to open external link"
     },
     {
-      "name": "toast_download_done",
-      "value": "Download complete"
-    },
-    {
       "name": "toast_download_fail",
       "value": "Download failed"
     },
     {
       "name": "toast_save_done",
       "value": "Saved to Downloads"
+    },
+    {
+      "name": "module_desc",
+      "value": "DeepSeek AI Assistant for HarmonyOS"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "DeepSeek Main Entry"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "DeepSeek"
+    },
+    {
+      "name": "internet_reason",
+      "value": "Network access is required to load the DeepSeek AI chat service"
+    },
+    {
+      "name": "network_info_reason",
+      "value": "Used to check network connectivity and provide clearer error prompts"
     }
   ]
 }

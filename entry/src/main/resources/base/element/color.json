@@ -3,6 +3,74 @@
     {
       "name": "start_window_background",
       "value": "#FFFFFF"
+    },
+    {
+      "name": "web_background",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "text_primary",
+      "value": "#333333"
+    },
+    {
+      "name": "text_secondary",
+      "value": "#999999"
+    },
+    {
+      "name": "text_body",
+      "value": "#666666"
+    },
+    {
+      "name": "text_on_accent",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "accent",
+      "value": "#4A90D9"
+    },
+    {
+      "name": "surface_card",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "surface_tile",
+      "value": "#F5F5F5"
+    },
+    {
+      "name": "surface_button_secondary",
+      "value": "#F0F0F0"
+    },
+    {
+      "name": "text_button_secondary",
+      "value": "#555555"
+    },
+    {
+      "name": "floating_button_bg",
+      "value": "#E6FFFFFF"
+    },
+    {
+      "name": "floating_button_shadow",
+      "value": "#1A000000"
+    },
+    {
+      "name": "card_shadow",
+      "value": "#4D000000"
+    },
+    {
+      "name": "modal_scrim",
+      "value": "#80000000"
+    },
+    {
+      "name": "drag_indicator",
+      "value": "#59000000"
+    },
+    {
+      "name": "drag_indicator_bg",
+      "value": "#0F000000"
+    },
+    {
+      "name": "progress_track",
+      "value": "#00FFFFFF"
     }
   ]
 }

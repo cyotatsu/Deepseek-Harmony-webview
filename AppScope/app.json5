@@ -1,9 +1,9 @@
 {
   "app": {
-    "bundleName": "dev.sakuraneko.DeepSeek.OH",
-    "vendor": "example",
-    "versionCode": 1001040,
-    "versionName": "1.1.4",
+    "bundleName": "dev.cyotatsu.deepseek.oh",
+    "vendor": "cyotatsu",
+    "versionCode": 1001041,
+    "versionName": "1.1.4.1",
     "buildVersion": "1",
     "icon": "$media:layered_image",
     "label": "$string:app_name"

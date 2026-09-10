@@ -3,8 +3,10 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { webview } from '@kit.ArkWeb';
 import { window } from '@kit.ArkUI';
 import { url } from '@kit.ArkTS';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { i18n } from '@kit.LocalizationKit';
+import { DEEPSEEK_URL, DEEPSEEK_HOST } from '../common/AppConfig';
+import { cleanupPhotoTempFiles } from '../common/PhotoTempFiles';
 
 const DOMAIN = 0x0001;
 const TAG = 'DeepSeekEntryAbility';
@@ -17,8 +19,10 @@ export default class EntryAbility extends UIAbility {
     if (!webEngineInitialized) {
       try {
         webview.WebviewController.initializeWebEngine();
+        // 预解析、预连接首页域名，加速首屏加载（须在 initializeWebEngine 之后调用）
+        webview.WebviewController.prepareForPageLoad(DEEPSEEK_URL, true, 2);
         webEngineInitialized = true;
-        hilog.info(DOMAIN, TAG, 'WebEngine initialized');
+        hilog.info(DOMAIN, TAG, 'WebEngine initialized & preconnected');
       } catch (err) {
         hilog.error(DOMAIN, TAG, 'Failed to initialize WebEngine');
       }
@@ -45,6 +49,11 @@ export default class EntryAbility extends UIAbility {
 
     // 处理Deep Link跳转（冷启动）
     this.handleDeepLink(want);
+
+    // 清理上次运行遗留的拍照临时文件。
+    // handleTakePhoto 预创建的文件在上传成功后不便立即删除（WebView 可能仍在校验读取），
+    // 因此改为启动时统一清理 —— 此刻不可能有上传在进行，安全且能让目录自愈。
+    cleanupPhotoTempFiles(this.context.filesDir);
 
     // 非DeepLink启动：清空残留URL，防止旧值干扰
     if (!want?.uri) {
@@ -96,6 +105,11 @@ export default class EntryAbility extends UIAbility {
       mainWindowClass = windowStage.getMainWindowSync();
       if (mainWindowClass) {
         // 立即设置窗口背景色，避免启动闪白/闪黑（与 DeepSeek 官网颜色一致）
+        // 注：编译器对下面这行报 "This API is unavailable to phone, tablet, 2in1" 告警，
+        // 但经核对：SDK 声明中该方法并无任何设备限定（@crossplatform since 10、@since 9），
+        // 且真机（平板）实测调用成功、背景色生效。判定为编译期元数据误报（本项目
+        // targetSdk 23 与 compileSdk 26 存在版本差）。请勿据此删除该调用，
+        // 否则会失去启动防闪屏能力。
         const isDark: boolean =
           this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
         try {
@@ -113,17 +127,45 @@ export default class EntryAbility extends UIAbility {
           hilog.warn(DOMAIN, TAG, 'setImmersiveModeEnabledState not supported');
         }
 
-        // 2in1 / PC：隐藏系统标题栏（logo + 应用名称），内容区接管整个窗口
-        // 实现标题栏沉浸：标题栏区域背景色与 DeepSeek 官网顶部颜色一致
+        // 系统标题栏的显隐按窗口模式决定，而不是一律隐藏。
+        //
+        // 应用市场、设置等系统应用从不隐藏系统标题栏，因此它们在自由多窗下天然带有
+        // 「图标 + 应用名 + 最大化/最小化/关闭」，也天然可以拖动窗口。本应用为沉浸
+        // 外观隐藏了标题栏 —— 而 SDK 说明指出：标题栏隐藏后，主窗口进入全屏时
+        // **只有鼠标光标悬停热区**才会浮出标题栏；触屏没有悬停，于是自由多窗下既没有
+        // 应用标识、也没有拖动入口。
+        //
+        // 因此：自由多窗下保留系统标题栏（与其它应用表现一致，且它是拖动窗口的唯一
+        // 入口）；其余形态（含平板正常使用时的全屏）维持隐藏以保持沉浸。
+        const applyDecor = (win: window.Window | null): void => {
+          if (!win) {
+            return;
+          }
+          let keepDecor: boolean = true;
+          try {
+            keepDecor = win.isInFreeWindowMode();
+          } catch (err) {
+            hilog.warn(DOMAIN, TAG, 'isInFreeWindowMode not available, keep decor shown');
+          }
+          try {
+            win.setWindowDecorVisible(keepDecor);
+            hilog.info(DOMAIN, TAG, 'Window decor visible: %{public}s', String(keepDecor));
+          } catch (err) {
+            hilog.warn(DOMAIN, TAG, 'setWindowDecorVisible not available');
+          }
+        };
+        applyDecor(mainWindowClass);
         try {
-          mainWindowClass.setWindowDecorVisible(false);
-          hilog.info(DOMAIN, TAG, '2in1: title bar decor hidden');
+          mainWindowClass.on('freeWindowModeChange', (inFreeWindowMode: boolean) => {
+            hilog.info(DOMAIN, TAG, 'Free window mode changed: %{public}s', String(inFreeWindowMode));
+            applyDecor(mainWindowClass);
+          });
         } catch (err) {
-          hilog.warn(DOMAIN, TAG, 'setWindowDecorVisible not available');
+          hilog.warn(DOMAIN, TAG, 'freeWindowModeChange listener not available');
         }
         try {
           mainWindowClass.setWindowDecorHeight(40);
-          hilog.info(DOMAIN, TAG, '2in1: decor height set to 40');
+          hilog.info(DOMAIN, TAG, 'Window decor height set to 40');
         } catch (err) {
           hilog.warn(DOMAIN, TAG, 'setWindowDecorHeight not available');
         }
@@ -158,19 +200,24 @@ export default class EntryAbility extends UIAbility {
     const isDark: boolean =
       this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
 
-    // 手机端：状态栏透明 + 内容文字颜色适配
-    const sysBarProps: window.SystemBarProperties = {
-      statusBarColor: '#00000000',
-      statusBarContentColor: isDark ? '#FFFFFF' : '#000000'
-    };
-    try {
-      mainWindowClass.setWindowSystemBarProperties(sysBarProps).then(() => {
-        hilog.info(DOMAIN, TAG, 'StatusBar updated');
-      }).catch((err: BusinessError) => {
-        hilog.warn(DOMAIN, TAG, 'setWindowSystemBarProperties failed: %{public}d', err.code);
-      });
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'applyStatusBarStyle exception');
+    // 状态栏透明 + 内容文字颜色适配。
+    // setWindowSystemBarProperties 在 2in1 上不生效（SDK 文档明确说明
+    // "This API does not take effect on 2-in-1 devices"），故 2in1 直接跳过，
+    // 既省掉一次无意义的异步调用，也避免打出会误导排查的 "StatusBar updated" 日志。
+    if (deviceInfo.deviceType !== '2in1') {
+      const sysBarProps: window.SystemBarProperties = {
+        statusBarColor: '#00000000',
+        statusBarContentColor: isDark ? '#FFFFFF' : '#000000'
+      };
+      try {
+        mainWindowClass.setWindowSystemBarProperties(sysBarProps).then(() => {
+          hilog.info(DOMAIN, TAG, 'StatusBar updated');
+        }).catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'setWindowSystemBarProperties failed: %{public}d', err.code);
+        });
+      } catch (err) {
+        hilog.warn(DOMAIN, TAG, 'applyStatusBarStyle exception');
+      }
     }
 
     // 设置窗口背景色，与 DeepSeek 官网颜色一致
@@ -203,7 +250,7 @@ export default class EntryAbility extends UIAbility {
       return;
     }
 
-    hilog.info(DOMAIN, TAG, 'Received DeepLink URI: %{public}s', uri);
+    hilog.info(DOMAIN, TAG, 'Received DeepLink URI: %{private}s', uri);
 
     try {
       const urlObject = url.URL.parseURL(uri);
@@ -211,8 +258,8 @@ export default class EntryAbility extends UIAbility {
       const path = urlObject.pathname;
 
       // 处理DeepSeek分享链接
-      if (host === 'chat.deepseek.com' && path.startsWith('/share')) {
-        hilog.info(DOMAIN, TAG, 'DeepSeek share link detected, navigating to: %{public}s', uri);
+      if (host === DEEPSEEK_HOST && path.startsWith('/share')) {
+        hilog.info(DOMAIN, TAG, 'DeepSeek share link detected, navigating to: %{private}s', uri);
         AppStorage.setOrCreate('deepLinkUrl', uri);
       }
     } catch (err) {

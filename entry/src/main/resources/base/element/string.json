@@ -57,10 +57,6 @@
       "value": "文件"
     },
     {
-      "name": "upload_hint",
-      "value": "ⓘ 仅识别图片中的文字"
-    },
-    {
       "name": "share_description",
       "value": "来自DeepSeek的分享内容"
     },
@@ -71,10 +67,6 @@
     {
       "name": "toast_external_link",
       "value": "无法打开外部链接"
-    },
-    {
-      "name": "toast_download_done",
-      "value": "下载完成"
     },
     {
       "name": "toast_download_fail",

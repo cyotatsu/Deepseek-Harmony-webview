@@ -12,10 +12,15 @@ import { window } from '@kit.ArkUI';
 import { url } from '@kit.ArkTS';
 import { camera, cameraPicker } from '@kit.CameraKit';
 import { ALLOWED_UPLOAD_EXTENSIONS } from '../common/AllowedFileExtensions';
+import { DEEPSEEK_URL, DEEPSEEK_HOST } from '../common/AppConfig';
+import { isDeepSeekDomain, isDownloadUrl } from '../common/UrlRules';
+import { toBCP47 } from '../common/LanguageUtil';
+import { buildPhotoTempPath } from '../common/PhotoTempFiles';
+import { PageProgress } from '../components/PageProgress';
+import { ErrorView } from '../components/ErrorView';
 
 const DOMAIN = 0x0001;
 const TAG = 'DeepSeekIndex';
-const DEEPSEEK_URL = 'https://chat.deepseek.com/';
 
 @Entry
 @Component
@@ -25,16 +30,21 @@ struct Index {
   @State isError: boolean = false;
   @State isNetworkError: boolean = false;
   @StorageLink('deepLinkUrl') @Watch('onDeepLinkChange') deepLinkUrl: string = '';
+  // Web 控制器是否已挂载。冷启动期间为 false：此时 loadUrl 会抛异常。
+  private controllerReady: boolean = false;
+  // 因控制器未就绪而暂存的 DeepLink，待首页加载完成后补导航。
+  private pendingDeepLink: string = '';
+  // Web 的初始加载地址。冷启动带 DeepLink 时该值即为分享链接，否则为首页。
+  private initialUrl: string = DEEPSEEK_URL;
   // 系统语言适配：监听系统语言变化以重新注入 WebView
   @StorageLink('systemLanguage') @Watch('onSystemLanguageChange') systemLanguage: string = '';
   controller: webview.WebviewController = new webview.WebviewController();
   delegate: webview.WebDownloadDelegate = new webview.WebDownloadDelegate();
   private pageLoadTimer: number = -1;
   private readonly LOAD_TIMEOUT_MS: number = 15000;
-  // 深色模式适配
+  // 深色模式适配（组件配色改由资源限定词自动适配，见 resources/*/element/color.json）
   @StorageProp('currentColorMode') @Watch('onColorModeChange')
   currentColorMode: ConfigurationConstant.ColorMode = ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET;
-  @State webBgColor: Color = Color.White;
   // 2in1/PC 设备标识：用于显示拖拽手柄
   @State isPC: boolean = false;
   // 返回按钮：2in1 设备上访问非 DeepSeek 域名且有回退历史时显示
@@ -48,52 +58,113 @@ struct Index {
   aboutToAppear(): void {
     // 检测是否为 2in1/PC 设备
     this.isPC = deviceInfo.deviceType === '2in1';
+    // 冷启动携带的 DeepLink 直接作为 Web 的初始 src。
+    // 不能等到 onPageShow 再 loadUrl —— 那会比 onControllerAttached 早约 35ms，
+    // 控制器尚未绑定必然抛异常；即便推迟到 onControllerAttached，
+    // 组件的初始 src（首页）加载也会覆盖该次导航。作为初始 src 可彻底避开竞态。
     if (this.deepLinkUrl && this.deepLinkUrl !== '') {
-      hilog.info(DOMAIN, TAG, 'Will load DeepLink URL: %{public}s', this.deepLinkUrl);
+      this.initialUrl = this.deepLinkUrl;
+      hilog.info(DOMAIN, TAG, 'Cold-start DeepLink used as initial src');
+      // 已消费，立即清空，避免 onPageShow / onDeepLinkChange 重复处理
+      AppStorage.set<string>('deepLinkUrl', '');
     }
     // 初始化背景色
     this.onColorModeChange();
+    // 监听网络恢复：处于错误页时自动重连（NetworkKit NetConnection 官方用法）
+    try {
+      this.netConnection = connection.createNetConnection();
+      this.netConnection.on('netAvailable', this.onNetAvailable);
+      this.netConnection.register((error: BusinessError) => {
+        if (error) {
+          hilog.warn(DOMAIN, TAG, 'net register failed: %{public}d', error.code);
+        }
+      });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to register netAvailable listener');
+    }
   }
 
   aboutToDisappear(): void {
     // 组件销毁前清理定时器，避免内存泄漏和无效回调
     this.clearLoadTimeout();
-  }
-
-  // 系统深色模式切换时，同步 WebView 容器背景色，避免切换时白底闪烁
-  onColorModeChange(): void {
-    if (this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK) {
-      this.webBgColor = Color.Black;
-    } else {
-      this.webBgColor = Color.White;
+    // 取消网络监听，避免内存泄漏
+    try {
+      if (this.netConnection) {
+        this.netConnection.unregister((error: BusinessError) => {
+          if (error) {
+            hilog.warn(DOMAIN, TAG, 'net unregister failed: %{public}d', error.code);
+          }
+        });
+        this.netConnection = null;
+      }
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to unregister netAvailable listener');
     }
   }
 
-  // 拖拽指示点颜色（跟随深色/浅色模式）
-  get dragIndicatorColor(): string {
-    return this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-      ? 'rgba(255, 255, 255, 0.45)' : 'rgba(0, 0, 0, 0.35)';
+  // 网络连接对象：用于订阅网络状态变化（NetworkKit NetConnection）
+  private netConnection: connection.NetConnection | null = null;
+
+  // 网络恢复回调：仅在当前显示错误页时自动重新加载，避免打断正常浏览
+  private onNetAvailable: (data: connection.NetHandle) => void = (data: connection.NetHandle): void => {
+    hilog.info(DOMAIN, TAG, 'Network available, netId=%{public}d', data.netId);
+    if (this.isError) {
+      hilog.info(DOMAIN, TAG, 'Auto reload after network recovery');
+      this.refreshPage();
+    }
+  };
+
+  // 系统深色模式切换时同步状态栏样式。
+  // 页面背景色已改由资源限定词（resources/dark/element/color.json）自动适配，
+  // 不再需要手动改 webBgColor，也就不会因该状态变化触发额外重绘。
+  onColorModeChange(): void {
+    this.applyStatusBarColor();
   }
 
-  // 拖拽指示器背景色
-  get dragIndicatorBgColor(): string {
-    return this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-      ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.06)';
+  /**
+   * 状态栏自动反色：根据当前深色/浅色模式设置状态栏文字颜色，
+   * 避免状态栏文字与背景重叠导致内容无法辨认。
+   * 参考《开发应用沉浸式效果》官方文档的 setWindowSystemBarProperties 用法。
+   */
+  private applyStatusBarColor(): void {
+    // setWindowSystemBarProperties 在 2in1 上不生效（见 SDK 文档），跳过以免无谓调用
+    if (deviceInfo.deviceType === '2in1') {
+      return;
+    }
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const contentColor: string = this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
+        ? '#FFFFFF' : '#000000';
+      window.getLastWindow(ctx).then((win: window.Window) => {
+        win.setWindowSystemBarProperties({
+          statusBarContentColor: contentColor
+        }).catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'setStatusBarContentColor failed: %{public}d', err.code);
+        });
+      }).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'getLastWindow failed: %{public}d', err.code);
+      });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'applyStatusBarColor exception');
+    }
   }
 
   build() {
     Column() {
       Stack({ alignContent: Alignment.Top }) {
-        Web({ src: DEEPSEEK_URL, controller: this.controller })
+        Web({ src: this.initialUrl, controller: this.controller })
           .domStorageAccess(true)
           .javaScriptAccess(true)
+          // fileAccess 必须为 true：自 API 12 起该属性默认值为 false，
+          // 而拍照上传路径（handleTakePhoto → cameraPicker）返回的是应用沙箱内的
+          // file:// URI，Web 需要文件系统访问权限才能读取并上传该文件。
+          // 关闭该项会导致「拍照」上传失败，请勿"安全优化"为 false。
           .fileAccess(true)
-          .mixedMode(1)
+          .mixedMode(MixedMode.None)  // 官方安全默认：禁止加载 HTTP/HTTPS 混合内容
           .imageAccess(true)
           .zoomAccess(true)
           .darkMode(2)  // WebDarkMode.Auto: 跟随系统深色模式，传递 prefers-color-scheme 给网页
-          .backgroundColor(this.webBgColor)
-          .geolocationAccess(true)
+          .backgroundColor($r('app.color.web_background'))
           .width('100%')
           .height('100%')
           .onControllerAttached(() => {
@@ -104,13 +175,17 @@ struct Index {
               hilog.error(DOMAIN, TAG, 'Failed to set user agent');
             }
             this.setupDownloadDelegate();
+            this.controllerReady = true;
           })
           .onPageBegin((event) => {
             this.isLoading = true;
             this.isError = false;
             this.isNetworkError = false;
             this.startLoadTimeout();
-            // 在页面加载最早时机注入系统语言，确保网页 JS 读取 navigator.language 前已覆盖
+            // 在页面加载最早时机注入系统语言覆盖。
+            // 说明：曾改用 Web 组件的 javaScriptOnDocumentStart 做"文档开始前"注入，
+            // 但真机实测该属性对首次加载不生效（注入标记位始终为 undefined），
+            // 遂保留此运行时注入路径，避免功能整体失效。
             this.injectLanguageOverride();
           })
           .onProgressChange((event) => {
@@ -121,6 +196,14 @@ struct Index {
           .onPageEnd(() => {
             this.isLoading = false;
             this.clearLoadTimeout();
+            // 控制器就绪前被推迟的 DeepLink 在此补导航。
+            // 不能放在 onControllerAttached —— 那里会和组件的初始 src 加载相互覆盖。
+            if (this.pendingDeepLink !== '') {
+              const deferred: string = this.pendingDeepLink;
+              this.pendingDeepLink = '';
+              hilog.info(DOMAIN, TAG, 'Flushing deferred DeepLink navigation');
+              this.navigateToUrl(deferred);
+            }
             // 每次页面加载完成后注入剪贴板拦截脚本
             this.injectShareInterceptor();
             this.updateBackButtonState();
@@ -173,7 +256,7 @@ struct Index {
             // 仅在 chat.deepseek.com 域名下弹出上传模态框
             try {
               const pageUrl: string = this.controller.getUrl();
-              const isChatDeepSeek: boolean = url.URL.parseURL(pageUrl).hostname === 'chat.deepseek.com';
+              const isChatDeepSeek: boolean = url.URL.parseURL(pageUrl).hostname === DEEPSEEK_HOST;
               if (!isChatDeepSeek) {
                 event.result.handleFileList([]);
                 return true;
@@ -206,51 +289,56 @@ struct Index {
               return true;
             }
             // 非 DeepSeek 域名的页面跳转：仅拦截主框架导航，放行子请求（下载/资源等）
-            if (!this.isDeepSeekDomain(requestUrl) && event.data.isMainFrame()
-              && !this.isDownloadUrl(requestUrl)) {
+            if (!isDeepSeekDomain(requestUrl) && event.data.isMainFrame()
+              && !isDownloadUrl(requestUrl)) {
               this.openInSystemBrowser(requestUrl);
               return true;
             }
             return false;
           })
 
-        // 2in1/PC 拖拽手柄：隐藏标题栏后，用户可通过拖拽此区域移动窗口
+        // 2in1/PC 拖拽手柄：隐藏标题栏后，用户可通过拖拽此区域移动窗口。
+        // 注意：外层容器必须设为 HitTestMode.None 触摸穿透，否则整条顶部 24px 会
+        // 阻塞下层 Web 的点击（DeepSeek 网页顶栏按钮会点不动）；只有中间的手柄
+        // 区域响应拖动，其余区域的点击事件透传给网页。
         if (this.isPC) {
           Row() {
-            Row().width(3).height(3).borderRadius(1.5).backgroundColor(this.dragIndicatorColor)
-            Row().width(3).height(3).borderRadius(1.5).backgroundColor(this.dragIndicatorColor)
-              .margin({ left: 3, right: 3 })
-            Row().width(3).height(3).borderRadius(1.5).backgroundColor(this.dragIndicatorColor)
+            Row() {
+              Row().width(3).height(3).borderRadius(1.5).backgroundColor($r('app.color.drag_indicator'))
+              Row().width(3).height(3).borderRadius(1.5).backgroundColor($r('app.color.drag_indicator'))
+                .margin({ left: 3, right: 3 })
+              Row().width(3).height(3).borderRadius(1.5).backgroundColor($r('app.color.drag_indicator'))
+            }
+            .height(24)
+            .padding({ left: 16, right: 16 })
+            .justifyContent(FlexAlign.Center)
+            .onTouch((event: TouchEvent) => {
+              if (event.type === TouchType.Down) {
+                try {
+                  const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+                  window.getLastWindow(ctx).then((win: window.Window) => {
+                    win.startMoving().catch((err: BusinessError) => {
+                      hilog.warn(DOMAIN, TAG, 'startMoving failed: %{public}d', err.code);
+                    });
+                  }).catch(() => {
+                    hilog.warn(DOMAIN, TAG, 'getLastWindow failed');
+                  });
+                } catch (err) {
+                  hilog.warn(DOMAIN, TAG, 'startMoving exception');
+                }
+              }
+            })
+            .hitTestBehavior(HitTestMode.Block)
           }
           .width('100%')
           .height(24)
           .justifyContent(FlexAlign.Center)
-          .onTouch((event: TouchEvent) => {
-            if (event.type === TouchType.Down) {
-              try {
-                const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-                window.getLastWindow(ctx).then((win: window.Window) => {
-                  win.startMoving().catch((err: BusinessError) => {
-                    hilog.warn(DOMAIN, TAG, 'startMoving failed: %{public}d', err.code);
-                  });
-                }).catch(() => {
-                  hilog.warn(DOMAIN, TAG, 'getLastWindow failed');
-                });
-              } catch (err) {
-                hilog.warn(DOMAIN, TAG, 'startMoving exception');
-              }
-            }
-          })
-          .hitTestBehavior(HitTestMode.Block)
+          .hitTestBehavior(HitTestMode.None)
           .zIndex(10)
         }
 
         if (this.isLoading) {
-          Progress({ value: this.loadingProgress, type: ProgressType.Linear })
-            .width('100%')
-            .height(3)
-            .color('#4A90D9')
-            .backgroundColor('#00FFFFFF')
+          PageProgress({ progress: this.loadingProgress })
         }
 
         // 2in1 返回按钮：非 DeepSeek 域名且有回退历史时，左上角显示方形返回按钮
@@ -258,20 +346,17 @@ struct Index {
           Button() {
             Text('←')
               .fontSize(20)
-              .fontColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                ? '#FFFFFF' : '#333333')
+              .fontColor($r('app.color.text_primary'))
           }
           .width(36)
           .height(36)
           .type(ButtonType.Normal)
           .borderRadius(8)
-          .backgroundColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-            ? 'rgba(40, 40, 40, 0.9)' : 'rgba(255, 255, 255, 0.9)')
+          .backgroundColor($r('app.color.floating_button_bg'))
           .position({ x: 36, y: 36 })
           .shadow({
             radius: 8,
-            color: this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-              ? 'rgba(0, 0, 0, 0.4)' : 'rgba(0, 0, 0, 0.1)',
+            color: $r('app.color.floating_button_shadow'),
             offsetX: 0,
             offsetY: 2
           })
@@ -287,36 +372,10 @@ struct Index {
         }
 
         if (this.isError) {
-          Column() {
-            Text(this.isNetworkError ? '󰚑' : '󰊠')
-              .fontSize(48)
-              .fontColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                ? '#BBBBBB' : '#999999')
-              .margin({ top: 80, bottom: 16 })
-            Text(this.isNetworkError ? $r('app.string.error_network_title') : $r('app.string.error_load_title'))
-              .fontSize(18)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                ? '#FFFFFF' : '#333333')
-              .margin({ bottom: 8 })
-            Text(this.isNetworkError ? $r('app.string.error_network_desc') : $r('app.string.error_load_desc'))
-              .fontSize(14)
-              .fontColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                ? '#BBBBBB' : '#999999')
-              .margin({ bottom: 24 })
-            Button($r('app.string.retry_button'))
-              .type(ButtonType.Normal)
-              .fontSize(16).width(160).height(40).borderRadius(20)
-              .backgroundColor('#4A90D9').fontColor(Color.White)
-              .onClick(() => {
-                this.isError = false;
-                this.isNetworkError = false;
-                this.refreshPage();
-              })
-          }
-          .width('100%').height('100%')
-          .justifyContent(FlexAlign.Center)
-          .backgroundColor(this.webBgColor)
+          ErrorView({
+            isNetworkError: this.isNetworkError,
+            onRetry: () => this.onErrorRetry()
+          })
         }
 
         // 上传方式选择模态框
@@ -326,15 +385,14 @@ struct Index {
               Text($r('app.string.upload_modal_title'))
                 .fontSize(18)
                 .fontWeight(FontWeight.Medium)
-                .fontColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                  ? '#FFFFFF' : '#333333')
+                .fontColor($r('app.color.text_primary'))
                 .margin({ bottom: 20 })
 
               // 横向排列：拍照 / 相册 / 文件
               Row() {
                 // 拍照
                 Column() {
-                  Text('󰑛')
+                  SymbolGlyph($r('sys.symbol.camera_fill'))
                     .fontSize(28)
                     .margin({ bottom: 8 })
                   Text($r('app.string.upload_photo'))
@@ -344,13 +402,12 @@ struct Index {
                 .aspectRatio(1)
                 .borderRadius(14)
                 .justifyContent(FlexAlign.Center)
-                .backgroundColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                  ? '#3A3A3A' : '#F5F5F5')
+                .backgroundColor($r('app.color.surface_tile'))
                 .onClick(() => this.handleTakePhoto())
 
                 // 相册
                 Column() {
-                  Text('󰓥')
+                  SymbolGlyph($r('sys.symbol.picture_fill'))
                     .fontSize(28)
                     .margin({ bottom: 8 })
                   Text($r('app.string.upload_album'))
@@ -360,13 +417,12 @@ struct Index {
                 .aspectRatio(1)
                 .borderRadius(14)
                 .justifyContent(FlexAlign.Center)
-                .backgroundColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                  ? '#3A3A3A' : '#F5F5F5')
+                .backgroundColor($r('app.color.surface_tile'))
                 .onClick(() => this.handlePickFromAlbum())
 
                 // 文件
                 Column() {
-                  Text('󰃅')
+                  SymbolGlyph($r('sys.symbol.doc_text_fill'))
                     .fontSize(28)
                     .margin({ bottom: 8 })
                   Text($r('app.string.upload_file'))
@@ -376,32 +432,24 @@ struct Index {
                 .aspectRatio(1)
                 .borderRadius(14)
                 .justifyContent(FlexAlign.Center)
-                .backgroundColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                  ? '#3A3A3A' : '#F5F5F5')
+                .backgroundColor($r('app.color.surface_tile'))
                 .onClick(() => this.handlePickFile())
               }
               .width('100%')
               .justifyContent(FlexAlign.SpaceEvenly)
-              .margin({ bottom: 16 })
-
-              Text($r('app.string.upload_hint'))
-                .fontSize(13)
-                .fontColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                  ? '#888888' : '#999999')
             }
             .width('85%')
             .constraintSize({ maxWidth: 360 })
             .padding(24)
             .borderRadius(16)
-            .backgroundColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-              ? '#2A2A2A' : '#FFFFFF')
-            .shadow({ radius: 24, color: 'rgba(0,0,0,0.3)', offsetY: 8 })
+            .backgroundColor($r('app.color.surface_card'))
+            .shadow({ radius: 24, color: $r('app.color.card_shadow'), offsetY: 8 })
             .onClick(() => {})
           }
           .width('100%')
           .height('100%')
           .justifyContent(FlexAlign.Center)
-          .backgroundColor('rgba(0,0,0,0.5)')
+          .backgroundColor($r('app.color.modal_scrim'))
           .onClick(() => this.dismissUploadModal())
           .zIndex(100)
         }
@@ -411,18 +459,15 @@ struct Index {
           Button() {
             Text('↻')
               .fontSize(22)
-              .fontColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-                ? '#FFFFFF' : '#333333')
+              .fontColor($r('app.color.text_primary'))
           }
           .width(44)
           .height(44)
           .type(ButtonType.Circle)
-          .backgroundColor(this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-            ? 'rgba(40, 40, 40, 0.9)' : 'rgba(255, 255, 255, 0.9)')
+          .backgroundColor($r('app.color.floating_button_bg'))
           .shadow({
             radius: 12,
-            color: this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-              ? 'rgba(0, 0, 0, 0.4)' : 'rgba(0, 0, 0, 0.1)',
+            color: $r('app.color.floating_button_shadow'),
             offsetY: 4
           })
           .position({ x: '100%', y: '100%' })
@@ -445,7 +490,14 @@ struct Index {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.webBgColor)
+    .backgroundColor($r('app.color.web_background'))
+  }
+
+  /** 错误页「重新加载」：清除错误状态并刷新当前页 */
+  private onErrorRetry(): void {
+    this.isError = false;
+    this.isNetworkError = false;
+    this.refreshPage();
   }
 
   onPageShow(): void {
@@ -458,7 +510,7 @@ struct Index {
   // 响应热启动时 onNewWant 设置的 deepLinkUrl 变化（onPageShow 仅在冷/温启动触发）
   onDeepLinkChange(): void {
     if (this.deepLinkUrl && this.deepLinkUrl !== '') {
-      hilog.info(DOMAIN, TAG, 'DeepLink change detected: %{public}s', this.deepLinkUrl);
+      hilog.info(DOMAIN, TAG, 'DeepLink change detected: %{private}s', this.deepLinkUrl);
       this.navigateToUrl(this.deepLinkUrl);
       AppStorage.set<string>('deepLinkUrl', '');
     }
@@ -535,7 +587,7 @@ struct Index {
         (function() {
           if (window.__deepseekShareHooked) return;
           window.__deepseekShareHooked = true;
-          var PREFIX = 'https://chat.deepseek.com/share/';
+          var PREFIX = 'https://${DEEPSEEK_HOST}/share/';
           if (navigator.clipboard && navigator.clipboard.writeText) {
             var _orig = navigator.clipboard.writeText.bind(navigator.clipboard);
             navigator.clipboard.writeText = function(text) {
@@ -553,44 +605,49 @@ struct Index {
     }
   }
 
-  // 将系统语言标识转换为 BCP 47 格式（如 "zh-Hans-CN" → "zh-CN"），供 WebView navigator.language 使用
+  // 读取当前系统语言并规范化为 BCP 47（规范化规则见 common/LanguageUtil.toBCP47）
   private getBCP47Language(): string {
     try {
-      const raw: string = this.systemLanguage || i18n.System.getSystemLanguage();
-      if (!raw || raw.length === 0) {
-        return 'en';
-      }
-      const parts: string[] = raw.split('-');
-      const lang: string = parts[0]; // "zh"
-      // 查找地区部分（格式如 "zh-Hans-CN"，最后一段为2个大写字母的地区代码）
-      const lastPart: string = parts.length > 0 ? parts[parts.length - 1] : '';
-      if (lastPart.length === 2 && lastPart === lastPart.toUpperCase()) {
-        return `${lang}-${lastPart}`;
-      }
-      return lang;
+      return toBCP47(this.systemLanguage || i18n.System.getSystemLanguage());
     } catch (err) {
       return 'en';
     }
   }
 
-  // 注入 JS 覆盖 navigator.language / navigator.languages，使网页感知系统语言
+  /**
+   * 生成语言覆盖脚本（覆盖 navigator.language / navigator.languages）。
+   *
+   * 注意：这里是字符串拼装 JS，因此对语言标识做白名单过滤，避免拼出意外语句。
+   */
+  private buildLanguageScript(): string {
+    const bcp47Lang: string = this.getBCP47Language();
+    const safeLang: string = bcp47Lang.replace(/[^A-Za-z0-9-]/g, '');
+    return `(function () {
+      var lang = '${safeLang}';
+      // 注入标记：供自检确认"文档开始前注入"确实执行过（与分享拦截的
+      // __deepseekShareHooked 同一思路），不参与业务逻辑。
+      window.__deepseekLangInjected = lang;
+      Object.defineProperty(Object.getPrototypeOf(navigator), 'language', {
+        get: function () { return lang; },
+        configurable: true
+      });
+      Object.defineProperty(Object.getPrototypeOf(navigator), 'languages', {
+        get: function () { return [lang]; },
+        configurable: true
+      });
+    })();`;
+  }
+
+  /**
+   * 运行时语言切换：向「当前已加载的文档」补注入一次覆盖。
+   *
+   * 已渲染的界面文案不会因此改变，所以 onSystemLanguageChange 仍会提示用户手动刷新。
+   */
   private injectLanguageOverride(): void {
     const bcp47Lang: string = this.getBCP47Language();
-    hilog.info(DOMAIN, TAG, 'Injecting language: %{public}s', bcp47Lang);
+    hilog.info(DOMAIN, TAG, 'Re-injecting language into current document: %{public}s', bcp47Lang);
     try {
-      this.controller.runJavaScript(`
-        (function() {
-          var lang = '${bcp47Lang}';
-          Object.defineProperty(Object.getPrototypeOf(navigator), 'language', {
-            get: function() { return lang; },
-            configurable: true
-          });
-          Object.defineProperty(Object.getPrototypeOf(navigator), 'languages', {
-            get: function() { return [lang]; },
-            configurable: true
-          });
-        })();
-      `);
+      this.controller.runJavaScript(this.buildLanguageScript());
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'Failed to inject language override');
     }
@@ -611,8 +668,8 @@ struct Index {
     try {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const resMgr: resourceManager.ResourceManager = context.resourceManager;
-      const description: string = resMgr.getStringSync($r('app.string.share_description'));
-      const contentPrefix: string = resMgr.getStringSync($r('app.string.share_content_prefix'));
+      const description: string = resMgr.getStringSync($r('app.string.share_description').id);
+      const contentPrefix: string = resMgr.getStringSync($r('app.string.share_content_prefix').id);
       const shareData = new systemShare.SharedData({
         utd: utd.UniformDataType.HYPERLINK,
         content: url,
@@ -656,39 +713,6 @@ struct Index {
     }
   }
 
-  // 判断 URL 是否属于 DeepSeek 域名（chat.deepseek.com 及其子域名）
-  private isDeepSeekDomain(requestUrl: string): boolean {
-    try {
-      const parsed = url.URL.parseURL(requestUrl);
-      const hostname: string = parsed.hostname;
-      return hostname === 'chat.deepseek.com' || hostname.endsWith('.deepseek.com');
-    } catch (e) {
-      // URL 解析失败时保守处理，允许在 WebView 内加载
-      return true;
-    }
-  }
-
-  // 判断 URL 是否为下载链接（根据常见文件扩展名）
-  private isDownloadUrl(requestUrl: string): boolean {
-    const downloadExtensions = [
-      '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz',
-      '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-      '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.svg', '.webp',
-      '.mp3', '.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv',
-      '.exe', '.msi', '.apk', '.dmg', '.deb', '.rpm',
-      '.csv', '.json', '.xml', '.sql', '.db',
-      '.iso', '.img', '.bin',
-      '.txt', '.md', '.log'
-    ];
-    try {
-      const parsed = url.URL.parseURL(requestUrl);
-      const pathname: string = (parsed.pathname || '').toLowerCase();
-      return downloadExtensions.some(ext => pathname.endsWith(ext));
-    } catch (_e) {
-      return false;
-    }
-  }
-
   // 更新 2in1 返回按钮显示状态：仅 PC 设备 + 有回退历史 + 当前页非 chat.deepseek.com 时显示
   private updateBackButtonState(): void {
     if (!this.isPC) {
@@ -706,7 +730,7 @@ struct Index {
         this.showBackButton = false;
         return;
       }
-      const isChatDeepSeek: boolean = url.URL.parseURL(pageUrl).hostname === 'chat.deepseek.com';
+      const isChatDeepSeek: boolean = url.URL.parseURL(pageUrl).hostname === DEEPSEEK_HOST;
       this.showBackButton = !isChatDeepSeek;
     } catch (err) {
       this.showBackButton = false;
@@ -733,11 +757,20 @@ struct Index {
 
   // 导航到指定 URL（用于 DeepLink 跳转）
   private navigateToUrl(url: string): void {
+    // 冷启动时 onPageShow 早于 Web 的 onControllerAttached（真机实测相差约 35ms），
+    // 此刻 loadUrl 必抛 "The WebviewController must be associated with a Web component"。
+    // 原先直接失败并丢弃链接，导致冷启动分享链接 100% 打不开。故先暂存，待控制器挂载后补导航。
+    if (!this.controllerReady) {
+      this.pendingDeepLink = url;
+      hilog.info(DOMAIN, TAG, 'Controller not attached yet, deferring DeepLink navigation');
+      return;
+    }
     try {
       this.controller.loadUrl(url);
       this.isError = false;
     } catch (err) {
-      hilog.error(DOMAIN, TAG, 'navigateToUrl failed');
+      const e = err as BusinessError;
+      hilog.error(DOMAIN, TAG, 'navigateToUrl failed: code=%{public}d, msg=%{public}s', e.code, e.message);
     }
   }
 
@@ -747,7 +780,8 @@ struct Index {
       this.controller.refresh();
       this.isError = false;
     } catch (err) {
-      hilog.error(DOMAIN, TAG, 'refreshPage failed');
+      hilog.error(DOMAIN, TAG, 'refreshPage failed, fallback to loadUrl');
+      this.navigateToUrl(DEEPSEEK_URL);
     }
   }
 
@@ -776,13 +810,14 @@ struct Index {
         const guid: string = webDownloadItem.getGuid();
         const savePath: string = downloadPathMap[guid];
         hilog.info(DOMAIN, TAG, 'Download finish: %{public}s', guid);
-        this.getUIContext().getPromptAction().showToast({
-          message: $r('app.string.toast_download_done'),
-          duration: 2000
-        });
+        // 此处不再提示"下载完成"：文件此刻只在应用沙箱内，尚未落到用户可见目录。
+        // 保存成功由 saveToPublicDownload 里的 toast_save_done 提示；用户若取消
+        // 保存对话框则不作提示 —— 原先在此处提前弹"下载完成"，取消后会造成误导。
         if (savePath) {
           this.saveToPublicDownload(webDownloadItem.getSuggestedFileName(), savePath);
           downloadPathMap[guid] = '';
+        } else {
+          hilog.warn(DOMAIN, TAG, 'Download finished but sandbox path missing, guid=%{public}s', guid);
         }
       });
 
@@ -811,7 +846,9 @@ struct Index {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const documentSaveOptions = new picker.DocumentSaveOptions();
       documentSaveOptions.pickerMode = picker.DocumentPickerMode.DOWNLOAD;
-      documentSaveOptions.newFileNames = [fileName];
+      // 注意：DOWNLOAD 模式下 newFileNames / defaultFilePathUri / fileSuffixChoices
+      // 均不生效（见 SDK @ohos.file.picker.d.ts），该模式固定返回当前 hap 包名的
+      // 文件夹路径，文件名由下方手动拼接，因此这里不设置 newFileNames。
 
       const documentViewPicker = new picker.DocumentViewPicker(context);
       documentViewPicker.save(documentSaveOptions).then((result: Array<string>) => {
@@ -871,8 +908,8 @@ struct Index {
     try {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const pathDir: string = context.filesDir;
-      const fileName: string = `${new Date().getTime()}.jpg`;
-      filePath = pathDir + '/' + fileName;
+      // 用带专用前缀的路径，便于应用启动时按前缀清理历史遗留（见 common/PhotoTempFiles）
+      filePath = buildPhotoTempPath(pathDir);
       fs.createRandomAccessFileSync(filePath, fs.OpenMode.CREATE);
       pickerFileCreated = true;
       const saveUri: string = fileUri.getUriFromPath(filePath);
