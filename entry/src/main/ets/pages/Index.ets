@@ -1,5 +1,5 @@
 import { webview } from '@kit.ArkWeb';
-import { common, ConfigurationConstant, Want } from '@kit.AbilityKit';
+import { common, Want } from '@kit.AbilityKit';
 import { systemShare } from '@kit.ShareKit';
 import { uniformTypeDescriptor as utd } from '@kit.ArkData';
 import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
@@ -8,16 +8,20 @@ import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { resourceManager, i18n } from '@kit.LocalizationKit';
 import { connection } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { window } from '@kit.ArkUI';
+import { window, promptAction } from '@kit.ArkUI';
 import { url } from '@kit.ArkTS';
 import { camera, cameraPicker } from '@kit.CameraKit';
-import { ALLOWED_UPLOAD_EXTENSIONS } from '../common/AllowedFileExtensions';
-import { DEEPSEEK_URL, DEEPSEEK_HOST } from '../common/AppConfig';
+import { UPLOAD_FILTER_EXTENSIONS } from '../common/AllowedFileExtensions';
+import { DEEPSEEK_URL, DEEPSEEK_HOST, FEEDBACK_URL } from '../common/AppConfig';
 import { isDeepSeekDomain, isDownloadUrl } from '../common/UrlRules';
 import { toBCP47 } from '../common/LanguageUtil';
 import { buildPhotoTempPath } from '../common/PhotoTempFiles';
 import { PageProgress } from '../components/PageProgress';
 import { ErrorView } from '../components/ErrorView';
+import { RefreshConfirmDialog } from '../components/RefreshConfirmDialog';
+import { loadRefreshButtonOffset, saveRefreshButtonOffset, isRefreshHintShown,
+  markRefreshHintShown, isRefreshButtonEnabled, setRefreshButtonEnabled,
+  isRefreshConfirmSkipped, setRefreshConfirmSkipped } from '../common/UiPrefs';
 
 const DOMAIN = 0x0001;
 const TAG = 'DeepSeekIndex';
@@ -42,22 +46,54 @@ struct Index {
   delegate: webview.WebDownloadDelegate = new webview.WebDownloadDelegate();
   private pageLoadTimer: number = -1;
   private readonly LOAD_TIMEOUT_MS: number = 15000;
-  // 深色模式适配（组件配色改由资源限定词自动适配，见 resources/*/element/color.json）
-  @StorageProp('currentColorMode') @Watch('onColorModeChange')
-  currentColorMode: ConfigurationConstant.ColorMode = ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET;
-  // 2in1/PC 设备标识：用于显示拖拽手柄
+  // 2in1/PC 设备标识：用于返回按钮
   @State isPC: boolean = false;
   // 返回按钮：2in1 设备上访问非 DeepSeek 域名且有回退历史时显示
   @State showBackButton: boolean = false;
   // 上传方式选择模态框
   @State showUploadModal: boolean = false;
-  // 语言切换后显示右下角刷新按钮
-  @State showLangRefreshBtn: boolean = false;
+  // 右下角常驻刷新按钮（无状态：始终显示，点击后不隐藏）
+  // 键盘避让高度（vp）。键盘是浮层、不改变窗口尺寸，页面底部会落到键盘之下，
+  // 因此需要把右下角按钮抬高到键盘之上，否则会被键盘遮挡。
+  @State keyboardHeightVp: number = 0;
+  // 状态栏避让高度（vp）。底部沉浸开启后布局延伸到系统栏区域，顶部需要按此补 padding，
+  // 视觉上仍是一条正常的状态栏，而不是内容压到状态栏文字下面。
+  @State statusBarHeightVp: number = 0;
+  private avoidAreaHandler: ((data: window.AvoidAreaOptions) => void) | null = null;
+  // 刷新按钮的拖拽位移（相对默认的右下角位置）。长按后可拖到任意位置并停留。
+  @State btnDragX: number = 0;
+  @State btnDragY: number = 0;
+  // 拖拽过程中的视觉反馈
+  @State btnDragging: boolean = false;
+  // 手势开始时的位移基准
+  private btnDragBaseX: number = 0;
+  private btnDragBaseY: number = 0;
+  // 长按进入拖拽模式后，本次抬手不应再触发刷新
+  private btnSuppressClick: boolean = false;
+  // 刷新按钮直径与默认边距（vp），边界限制按这两个值计算
+  private readonly BTN_SIZE: number = 44;
+  private readonly BTN_MARGIN: number = 24;
+  // 页面可用尺寸（vp），由根容器 onAreaChange 提供，用于把按钮限制在屏幕内
+  @State pageW: number = 0;
+  @State pageH: number = 0;
+  // 首次启动时展示「长按可拖动」提示
+  @State showRefreshHint: boolean = false;
+  private refreshHintTimer: number = -1;
+  // 设置面板开关
+  @State showSettings: boolean = false;
+  // 右下角刷新按钮是否启用（设置面板里的开关，持久化）
+  @State refreshButtonEnabled: boolean = true;
+  // 用户已勾选「不再显示」刷新确认弹窗（持久化）
+  @State refreshSkipConfirm: boolean = false;
+  // 本次弹窗里「不再显示」的勾选状态（每次弹出前重置，@Link 绑定给弹窗组件）
+  @State noMoreRefreshPrompt: boolean = false;
   private pendingFileListHandler: ((fileList: Array<string>) => void) | null = null;
 
   aboutToAppear(): void {
     // 检测是否为 2in1/PC 设备
     this.isPC = deviceInfo.deviceType === '2in1';
+    this.setupKeyboardAvoid();
+    this.restoreRefreshButtonPrefs();
     // 冷启动携带的 DeepLink 直接作为 Web 的初始 src。
     // 不能等到 onPageShow 再 loadUrl —— 那会比 onControllerAttached 早约 35ms，
     // 控制器尚未绑定必然抛异常；即便推迟到 onControllerAttached，
@@ -68,8 +104,6 @@ struct Index {
       // 已消费，立即清空，避免 onPageShow / onDeepLinkChange 重复处理
       AppStorage.set<string>('deepLinkUrl', '');
     }
-    // 初始化背景色
-    this.onColorModeChange();
     // 监听网络恢复：处于错误页时自动重连（NetworkKit NetConnection 官方用法）
     try {
       this.netConnection = connection.createNetConnection();
@@ -87,6 +121,25 @@ struct Index {
   aboutToDisappear(): void {
     // 组件销毁前清理定时器，避免内存泄漏和无效回调
     this.clearLoadTimeout();
+    // 清理「长按可拖动」提示的定时器
+    if (this.refreshHintTimer !== -1) {
+      clearTimeout(this.refreshHintTimer);
+      this.refreshHintTimer = -1;
+    }
+    // 取消避让区监听
+    try {
+      const handler: ((data: window.AvoidAreaOptions) => void) | null = this.avoidAreaHandler;
+      if (handler) {
+        const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+        window.getLastWindow(ctx).then((win: window.Window) => {
+          win.off('avoidAreaChange', handler);
+        }).catch(() => {
+        });
+        this.avoidAreaHandler = null;
+      }
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'avoid area unregister failed');
+    }
     // 取消网络监听，避免内存泄漏
     try {
       if (this.netConnection) {
@@ -114,40 +167,10 @@ struct Index {
     }
   };
 
-  // 系统深色模式切换时同步状态栏样式。
-  // 页面背景色已改由资源限定词（resources/dark/element/color.json）自动适配，
-  // 不再需要手动改 webBgColor，也就不会因该状态变化触发额外重绘。
-  onColorModeChange(): void {
-    this.applyStatusBarColor();
-  }
-
   /**
-   * 状态栏自动反色：根据当前深色/浅色模式设置状态栏文字颜色，
-   * 避免状态栏文字与背景重叠导致内容无法辨认。
-   * 参考《开发应用沉浸式效果》官方文档的 setWindowSystemBarProperties 用法。
+   * 状态栏样式不再由应用设置 —— 窗口已完全交由系统管理（非沉浸式），
+   * 状态栏与标题栏均由系统按官方规范绘制，深浅色也由系统自动适配。
    */
-  private applyStatusBarColor(): void {
-    // setWindowSystemBarProperties 在 2in1 上不生效（见 SDK 文档），跳过以免无谓调用
-    if (deviceInfo.deviceType === '2in1') {
-      return;
-    }
-    try {
-      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      const contentColor: string = this.currentColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-        ? '#FFFFFF' : '#000000';
-      window.getLastWindow(ctx).then((win: window.Window) => {
-        win.setWindowSystemBarProperties({
-          statusBarContentColor: contentColor
-        }).catch((err: BusinessError) => {
-          hilog.warn(DOMAIN, TAG, 'setStatusBarContentColor failed: %{public}d', err.code);
-        });
-      }).catch((err: BusinessError) => {
-        hilog.warn(DOMAIN, TAG, 'getLastWindow failed: %{public}d', err.code);
-      });
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'applyStatusBarColor exception');
-    }
-  }
 
   build() {
     Column() {
@@ -297,45 +320,8 @@ struct Index {
             return false;
           })
 
-        // 2in1/PC 拖拽手柄：隐藏标题栏后，用户可通过拖拽此区域移动窗口。
-        // 注意：外层容器必须设为 HitTestMode.None 触摸穿透，否则整条顶部 24px 会
-        // 阻塞下层 Web 的点击（DeepSeek 网页顶栏按钮会点不动）；只有中间的手柄
-        // 区域响应拖动，其余区域的点击事件透传给网页。
-        if (this.isPC) {
-          Row() {
-            Row() {
-              Row().width(3).height(3).borderRadius(1.5).backgroundColor($r('app.color.drag_indicator'))
-              Row().width(3).height(3).borderRadius(1.5).backgroundColor($r('app.color.drag_indicator'))
-                .margin({ left: 3, right: 3 })
-              Row().width(3).height(3).borderRadius(1.5).backgroundColor($r('app.color.drag_indicator'))
-            }
-            .height(24)
-            .padding({ left: 16, right: 16 })
-            .justifyContent(FlexAlign.Center)
-            .onTouch((event: TouchEvent) => {
-              if (event.type === TouchType.Down) {
-                try {
-                  const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-                  window.getLastWindow(ctx).then((win: window.Window) => {
-                    win.startMoving().catch((err: BusinessError) => {
-                      hilog.warn(DOMAIN, TAG, 'startMoving failed: %{public}d', err.code);
-                    });
-                  }).catch(() => {
-                    hilog.warn(DOMAIN, TAG, 'getLastWindow failed');
-                  });
-                } catch (err) {
-                  hilog.warn(DOMAIN, TAG, 'startMoving exception');
-                }
-              }
-            })
-            .hitTestBehavior(HitTestMode.Block)
-          }
-          .width('100%')
-          .height(24)
-          .justifyContent(FlexAlign.Center)
-          .hitTestBehavior(HitTestMode.None)
-          .zIndex(10)
-        }
+        // 窗口拖动不再由应用自绘手柄承担 —— 窗口已完全交由系统管理（非沉浸式），
+        // 系统标题栏即拖动区，且不自绘任何窗口部件。
 
         if (this.isLoading) {
           PageProgress({ progress: this.loadingProgress })
@@ -454,43 +440,189 @@ struct Index {
           .zIndex(100)
         }
 
-        // 语言切换刷新按钮：系统语言变化时在右下角显示圆形刷新按钮
-        if (this.showLangRefreshBtn) {
-          Button() {
-            Text('↻')
-              .fontSize(22)
-              .fontColor($r('app.color.text_primary'))
-          }
-          .width(44)
-          .height(44)
-          .type(ButtonType.Circle)
-          .backgroundColor($r('app.color.floating_button_bg'))
-          .shadow({
-            radius: 12,
-            color: $r('app.color.floating_button_shadow'),
-            offsetY: 4
-          })
-          .position({ x: '100%', y: '100%' })
-          .markAnchor({ x: '100%', y: '100%' })
-          .translate({ x: -24, y: -24 })
-          .onClick(() => {
-            try {
-              this.controller.refresh();
-            } catch (err) {
-              hilog.error(DOMAIN, TAG, 'Language refresh failed');
-            }
-            this.showLangRefreshBtn = false;
-          })
-          .transition(TransitionEffect.OPACITY.animation({ duration: 300 }))
-          .zIndex(101)
+        // 首次启动的「长按可拖动」提示：位于操作条正上方、水平居中对齐，
+        // 6 秒后自动收起，用户长按进入拖拽时也会立即收起。只在首次启动提示一次。
+        if (this.showRefreshHint && this.refreshButtonEnabled) {
+          Text($r('app.string.refresh_drag_hint'))
+            .fontSize(13)
+            .fontColor($r('app.color.text_on_accent'))
+            .backgroundColor($r('app.color.accent'))
+            .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+            .borderRadius(14)
+            .position({ x: '100%', y: '100%' })
+            // 锚点取下边缘中点：这样 translate 给出的就是气泡「底边中心」的位置，
+            // 与操作条的水平中心对齐，气泡整体落在条的上方。
+            .markAnchor({ x: '50%', y: '100%' })
+            .translate({
+              // 水平：与操作条中心对齐（条右边缘在 pageW - BTN_MARGIN + btnDragX，
+              // 再左移半个条宽即为中心）
+              x: -this.BTN_MARGIN + this.btnDragX - this.btnBarWidth() / 2,
+              // 垂直：条顶边再上移 8vp（条的顶边 = 基准位置 - 条高 - 键盘避让抬高）
+              y: -this.BTN_MARGIN + this.btnDragY - this.keyboardLiftVp() - this.BTN_SIZE - 8
+            })
+            .zIndex(102)
+            .onClick(() => this.dismissRefreshHint())
         }
+
+        // 右下角悬浮操作条：刷新 + 设置合并为一个圆角矩形。
+        // 早先是两个独立圆形按钮，拖动后容易相互重叠；合并成一条后两者的相对位置固定，
+        // 也不会各自与网页右下角的内容争抢空间。长按整条可拖动，松手停留、位置持久化。
+        Row() {
+          // 刷新：一键重新加载网页（可在设置面板中关闭）
+          if (this.refreshButtonEnabled) {
+            Row() {
+              Text('↻')
+                .fontSize(22)
+                .fontColor($r('app.color.text_primary'))
+            }
+            .layoutWeight(1)
+            .height('100%')
+            .justifyContent(FlexAlign.Center)
+            .onClick(() => {
+              if (this.btnSuppressClick) {
+                // 本次是长按拖拽的抬手，不当作刷新
+                this.btnSuppressClick = false;
+                return;
+              }
+              // 刷新会丢弃未提交的输入，先征求确认；
+              // 用户勾选过「不再显示」则直接刷新，不再打扰。
+              if (this.refreshSkipConfirm) {
+                this.doRefresh();
+              } else {
+                this.noMoreRefreshPrompt = false;
+                this.showRefreshConfirm();
+              }
+            })
+
+            Divider()
+              .vertical(true)
+              .height(20)
+              .color($r('app.color.drag_indicator'))
+          }
+
+          // 设置：采用官方符号 gearshape（系统资源码位 0xF0020，线性齿轮）
+          Row() {
+            SymbolGlyph($r('sys.symbol.gearshape'))
+              .fontSize(20)
+              .fontColor([$r('app.color.text_primary')])
+          }
+          .layoutWeight(1)
+          .height('100%')
+          .justifyContent(FlexAlign.Center)
+          .onClick(() => {
+            this.showSettings = true;
+          })
+        }
+        .width(this.btnBarWidth())
+        .height(this.BTN_SIZE)
+        .borderRadius(this.BTN_SIZE / 2)
+        // 长按进入拖动态时给出高亮：底色提亮 + 阴影加深 + 整体放大
+        .backgroundColor(this.btnDragging
+          ? $r('app.color.floating_button_bg_active')
+          : $r('app.color.floating_button_bg'))
+        .shadow({
+          radius: this.btnDragging ? 20 : 12,
+          color: $r('app.color.floating_button_shadow'),
+          offsetY: this.btnDragging ? 8 : 4
+        })
+        .scale({ x: this.btnDragging ? 1.12 : 1, y: this.btnDragging ? 1.12 : 1 })
+        // animation 作用于「它之前声明的所有属性」，因此上面这些视觉属性会平滑过渡。
+        // 务必把 .translate 放在它之后 —— 位置不参与动画，拖动才能完全跟手；
+        // 若把 translate 写在 animation 之前，位移会被套上缓动，手感发飘、迟滞。
+        .animation({ duration: 150, curve: Curve.FastOutSlowIn })
+        .position({ x: '100%', y: '100%' })
+        .markAnchor({ x: '100%', y: '100%' })
+        .translate({
+          // 基础位置：距右下角 BTN_MARGIN；再加上用户拖拽的位移；
+          // 键盘确实遮挡时才按需抬高（不遮挡则完全不移动）。
+          // 位于 .animation 之后 → 不参与动画 → 跟手无延迟。
+          x: -this.BTN_MARGIN + this.btnDragX,
+          y: -this.BTN_MARGIN + this.btnDragY - this.keyboardLiftVp()
+        })
+        // 每次新的触摸都重置「本次不刷新」标记
+        .onTouch((event: TouchEvent) => {
+          if (event.type === TouchType.Down) {
+            this.btnSuppressClick = false;
+          }
+        })
+        // 长按后拖动：官方手势组合。用「长按 → 拖动」序列把拖拽与单击区分开，
+        // 避免普通点击被误判为拖动。
+        .gesture(
+          GestureGroup(GestureMode.Sequence,
+            LongPressGesture({ repeat: false, duration: 400 })
+              .onAction(() => {
+                // 先把当前的键盘避让量固化进 btnDragY（此刻 btnDragging 仍为 false，
+                // keyboardLiftVp 还能算出真实值），使按钮在进入拖动瞬间保持原位、不跳动；
+                // 随后 btnDragging 置 true，拖动全程不再参与避让，完全跟手。
+                this.btnDragY = this.btnDragY - this.keyboardLiftVp();
+                // 进入拖拽模式：给出视觉反馈，抑制随后的点击，并收起首次提示
+                this.btnDragging = true;
+                this.btnSuppressClick = true;
+                this.dismissRefreshHint();
+              })
+              .onActionEnd(() => {
+                this.btnDragging = false;
+              })
+              .onActionCancel(() => {
+                this.btnDragging = false;
+              }),
+            PanGesture({ fingers: 1, direction: PanDirection.All, distance: 1 })
+              .onActionStart(() => {
+                this.btnDragBaseX = this.btnDragX;
+                this.btnDragBaseY = this.btnDragY;
+              })
+              .onActionUpdate((event: GestureEvent) => {
+                this.btnDragX = this.btnDragBaseX + event.offsetX;
+                this.btnDragY = this.btnDragBaseY + event.offsetY;
+                // 拖动过程中就做边界限制，使按钮到窗口边缘即停住，
+                // 而不是拖出去、松手才弹回来
+                this.clampBtnOffset();
+              })
+              .onActionEnd(() => {
+                this.btnDragging = false;
+                // 限制在屏幕内，并记住位置
+                this.clampBtnOffset();
+                this.saveButtonOffset();
+                hilog.info(DOMAIN, TAG, 'Floating bar moved to (%{public}d, %{public}d)',
+                  this.btnDragX, this.btnDragY);
+              })
+          )
+        )
+        .zIndex(101)
       }
       .width('100%')
       .layoutWeight(1)
+      // 记录刷新按钮实际可用的坐标空间（Stack 才是按钮 100% 定位的参照），
+      // 用于把按钮限制在窗口内；非全屏（悬浮窗/自由多窗）时这里就是应用窗口的尺寸。
+      .onAreaChange((_oldValue: Area, newValue: Area) => {
+        this.pageW = newValue.width as number;
+        this.pageH = newValue.height as number;
+        this.clampBtnOffset();
+      })
     }
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.web_background'))
+    // 顶部按状态栏避让高度补 padding —— 底部保持 0，内容自然延伸到透明的手势导航条之下，
+    // 即「顶部正常状态栏 + 底部沉浸」。详见 setupKeyboardAvoid 的说明。
+    .padding({ top: this.statusBarHeightVp, bottom: 0 })
+    // 设置面板：官方半模态组件 bindSheet。
+    // 手机端用 CONTENT_COVER（全屏覆盖），平板/2in1 等大屏用 CENTER（屏幕中间独立窗口），
+    // 这是官方对「大屏居中、小屏全屏」的标准处理方式。
+    .bindSheet($$this.showSettings, this.settingsSheet(), {
+      preferType: deviceInfo.deviceType === 'phone'
+        ? SheetType.CONTENT_COVER : SheetType.CENTER,
+      backgroundColor: $r('app.color.surface_card'),
+      // 标题栏与关闭按钮一律自绘（见 settingsSheet 内的标题栏）。因此这里：
+      //   · 不设 title      —— 避免与自绘标题重复；
+      //   · showClose=false —— CENTER（平板）形态系统默认会渲染一颗关闭按钮，
+      //                        不关掉就会与自绘的那颗叠在同一位置。
+      // 手机端 CONTENT_COVER 形态系统本来就不渲染标题栏，自绘是唯一可行方案。
+      showClose: false,
+      onDisappear: () => {
+        this.showSettings = false;
+      }
+    })
   }
 
   /** 错误页「重新加载」：清除错误状态并刷新当前页 */
@@ -641,7 +773,8 @@ struct Index {
   /**
    * 运行时语言切换：向「当前已加载的文档」补注入一次覆盖。
    *
-   * 已渲染的界面文案不会因此改变，所以 onSystemLanguageChange 仍会提示用户手动刷新。
+   * 真机实测：注入后页面界面会随之自动更新，无需用户手动刷新。
+   * （原注释曾断言「已渲染的文案不会因此改变、需手动刷新」，实测不成立。）
    */
   private injectLanguageOverride(): void {
     const bcp47Lang: string = this.getBCP47Language();
@@ -653,13 +786,13 @@ struct Index {
     }
   }
 
-  // 系统语言变化时，重新注入 JS 覆盖 navigator.language 并显示刷新按钮。
-  // 用户可点击按钮手动刷新以应用新语言，避免自动刷新打断当前操作。
+  // 系统语言变化时，重新注入 JS 覆盖 navigator.language。
+  // 实测页面会随之自动更新，无需手动刷新；右下角的刷新按钮是通用刷新入口，
+  // 与语言切换无关。
   onSystemLanguageChange(): void {
     if (this.systemLanguage && this.systemLanguage !== '') {
       hilog.info(DOMAIN, TAG, 'System language changed, re-injecting language override');
       this.injectLanguageOverride();
-      this.showLangRefreshBtn = true;
     }
   }
 
@@ -737,10 +870,64 @@ struct Index {
     }
   }
 
-  // 调用系统浏览器打开外部链接
+  /**
+   * 打开外部链接。**先弹确认框，用户点「同意」后才跳转** ——
+   * 跳浏览器会把应用切到后台、打断当前操作，属于需要用户明确同意的行为。
+   *
+   * 同意后走官方高层接口 openLink（@since 12）：
+   *   · 先走 App Linking 匹配已注册该域名的应用；
+   *   · appLinkingOnly 传 false（默认值），未匹配到时自动回退到 Deep Linking，
+   *     由系统选定浏览器打开 —— 这正是「请求打开浏览器」的官方做法；
+   *   · hideFailureTipDialog 传 true，避免无匹配应用时再弹一次系统提示框，
+   *     失败改由我们自己的 toast 兜底。
+   */
   private openInSystemBrowser(openUrl: string): void {
     try {
-      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      this.getUIContext().getPromptAction().showDialog({
+        title: $r('app.string.browser_confirm_title'),
+        message: $r('app.string.browser_confirm_message'),
+        buttons: [
+          { text: $r('app.string.common_cancel'), color: $r('app.color.text_button_secondary') },
+          { text: $r('app.string.common_agree'), color: $r('app.color.accent') }
+        ]
+      }).then((result: promptAction.ShowDialogSuccessResponse) => {
+        // 按钮顺序为 [取消, 同意]，index 1 才是同意
+        if (result.index === 1) {
+          this.doOpenInBrowser(openUrl);
+        } else {
+          hilog.info(DOMAIN, TAG, 'User declined to open external link');
+        }
+      }).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'showDialog failed: %{public}d', err.code);
+      });
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'Failed to show confirm dialog');
+    }
+  }
+
+  // 用户同意后实际执行跳转
+  private doOpenInBrowser(openUrl: string): void {
+    let context: common.UIAbilityContext;
+    try {
+      context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'Failed to get ability context');
+      return;
+    }
+
+    context.openLink(openUrl, { appLinkingOnly: false, hideFailureTipDialog: true })
+      .then(() => {
+        hilog.info(DOMAIN, TAG, 'openLink succeeded');
+      })
+      .catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'openLink failed (%{public}d), fallback to startAbility', err.code);
+        this.openViaStartAbility(context, openUrl);
+      });
+  }
+
+  // openLink 的降级路径：经典 Want 方式，最稳妥
+  private openViaStartAbility(context: common.UIAbilityContext, openUrl: string): void {
+    try {
       const want: Want = {
         action: 'ohos.want.action.viewData',
         entities: ['entity.system.browsable'],
@@ -751,7 +938,7 @@ struct Index {
         this.getUIContext().getPromptAction().showToast({ message: $r('app.string.toast_external_link'), duration: 2000 });
       });
     } catch (err) {
-      hilog.error(DOMAIN, TAG, 'openInSystemBrowser error');
+      hilog.error(DOMAIN, TAG, 'openViaStartAbility error');
     }
   }
 
@@ -771,6 +958,391 @@ struct Index {
     } catch (err) {
       const e = err as BusinessError;
       hilog.error(DOMAIN, TAG, 'navigateToUrl failed: code=%{public}d, msg=%{public}s', e.code, e.message);
+    }
+  }
+
+  /**
+   * 订阅窗口避让区变化，分别记录状态栏高度与键盘高度。
+   *
+   * 底部沉浸（setWindowLayoutFullScreen(true)）让布局延伸到系统栏区域，
+   * 因此：
+   *   · 顶部需要按状态栏高度（TYPE_SYSTEM.topRect）补 padding，保持「正常状态栏」观感；
+   *   · 底部 padding 保持 0，内容自然铺到屏幕最底部、延伸到透明的手势导航条之下；
+   *   · 键盘是浮层、不改变窗口尺寸，需单独把右下角刷新按钮抬高，否则会被遮挡。
+   * 避让区单位均为 px（SDK 说明），统一换算为 vp。
+   */
+  private setupKeyboardAvoid(): void {
+    this.avoidAreaHandler = (data: window.AvoidAreaOptions) => {
+      if (data.type === window.AvoidAreaType.TYPE_SYSTEM) {
+        const topPx: number = data.area.visible ? data.area.topRect.height : 0;
+        const topVp: number = topPx > 0 ? this.getUIContext().px2vp(topPx) : 0;
+        if (topVp !== this.statusBarHeightVp) {
+          this.statusBarHeightVp = topVp;
+          hilog.info(DOMAIN, TAG, 'Status bar height: %{public}d px -> %{public}d vp', topPx, topVp);
+        }
+        return;
+      }
+      if (data.type !== window.AvoidAreaType.TYPE_KEYBOARD) {
+        return;
+      }
+      const px: number = data.area.visible ? data.area.bottomRect.height : 0;
+      const vp: number = px > 0 ? this.getUIContext().px2vp(px) : 0;
+      if (vp !== this.keyboardHeightVp) {
+        this.keyboardHeightVp = vp;
+        hilog.info(DOMAIN, TAG, 'Keyboard avoid height: %{public}d px -> %{public}d vp', px, vp);
+        // 键盘高度变化会改变按钮的可用范围，重新做一次边界限制
+        this.clampBtnOffset();
+      }
+    };
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      window.getLastWindow(ctx).then((win: window.Window) => {
+        // 先取一次初始值：监听只在变化时回调，启动时不会触发
+        try {
+          const sysArea: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+          this.statusBarHeightVp = this.getUIContext().px2vp(sysArea.topRect.height);
+        } catch (err) {
+          hilog.warn(DOMAIN, TAG, 'getWindowAvoidArea failed');
+        }
+        if (this.avoidAreaHandler) {
+          win.on('avoidAreaChange', this.avoidAreaHandler);
+        }
+      }).catch(() => {
+        hilog.warn(DOMAIN, TAG, 'getLastWindow failed for avoid area');
+      });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'setupKeyboardAvoid exception');
+    }
+  }
+
+  /**
+   * 恢复刷新按钮上次被拖到的位置；若是首次启动，展示一次「长按可拖动」提示。
+   * 存储读写失败都不影响使用，只是回到默认位置 / 不再提示。
+   */
+  private restoreRefreshButtonPrefs(): void {
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const offset: number[] = loadRefreshButtonOffset(ctx);
+      if (offset.length === 2) {
+        this.btnDragX = offset[0];
+        this.btnDragY = offset[1];
+      }
+      this.refreshButtonEnabled = isRefreshButtonEnabled(ctx);
+      this.refreshSkipConfirm = isRefreshConfirmSkipped(ctx);
+      if (!isRefreshHintShown(ctx)) {
+        this.showRefreshHint = true;
+        markRefreshHintShown(ctx);
+        hilog.info(DOMAIN, TAG, 'Showing long-press hint for the first launch');
+        // 6 秒后自动收起
+        this.refreshHintTimer = setTimeout(() => {
+          this.showRefreshHint = false;
+          this.refreshHintTimer = -1;
+        }, 6000);
+      }
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to restore refresh button prefs');
+    }
+  }
+
+  /**
+   * 键盘实际遮挡刷新按钮时所需的抬高量（vp）；不遮挡返回 0，即完全不移动。
+   *
+   * 键盘浮在页面底部、占据下方 keyboardHeightVp；按钮底边（未避让时）位于
+   * pageH - BTN_MARGIN + btnDragY。只有底边低于键盘上沿才算被遮挡，此时抬高到
+   * 键盘上沿之上并保留 BTN_MARGIN 间距 —— 位移刚好够露出按钮，而不是无条件
+   * 上移整个键盘高度（按钮本来就高于键盘时不应有任何动作）。
+   *
+   * **拖动过程中必须返回 0**：避让量本身是由 btnDragY 推导出来的，若拖动时仍参与
+   * 计算，会得到恒等式「渲染位置 = -(BTN_MARGIN + 键盘高)」—— btnDragY 被完全抵消，
+   * 表现为键盘弹起后按钮怎么拖都不动。进入拖动前已把当时的避让量固化进 btnDragY
+   *（见 LongPressGesture.onAction），因此这里返回 0 不会造成跳动。
+   */
+  private keyboardLiftVp(): number {
+    if (this.btnDragging || this.keyboardHeightVp <= 0 || this.pageH <= 0) {
+      return 0;
+    }
+    const btnBottom: number = this.pageH - this.BTN_MARGIN + this.btnDragY;
+    const keyboardTop: number = this.pageH - this.keyboardHeightVp;
+    if (btnBottom <= keyboardTop) {
+      return 0;
+    }
+    return btnBottom - keyboardTop + this.BTN_MARGIN;
+  }
+
+  // 悬浮操作条宽度：刷新可用时为两段（刷新 | 设置），关闭刷新后只剩设置一段
+  private btnBarWidth(): number {
+    return this.refreshButtonEnabled ? this.BTN_SIZE * 2 + 8 : this.BTN_SIZE;
+  }
+
+  /**
+   * 把刷新按钮的拖拽位移限制在屏幕内，避免拖出可视区域后找不回来。
+   * 按钮右下角位于 (pageW - BTN_MARGIN + dx, pageH - BTN_MARGIN + dy)，
+   * 横向占用 btnBarWidth()、纵向占用 BTN_SIZE，据此反推位移的可用范围。
+   * 键盘遮挡不在这里预留 —— 那是 keyboardLiftVp 的职责，避免重复抬高。
+   */
+  private clampBtnOffset(): void {
+    if (this.pageW <= 0 || this.pageH <= 0) {
+      return;
+    }
+    const barW: number = this.btnBarWidth();
+    const maxDx: number = this.BTN_MARGIN;
+    const minDx: number = -(this.pageW - barW - this.BTN_MARGIN);
+    const maxDy: number = this.BTN_MARGIN;
+    const minDy: number = -(this.pageH - this.BTN_SIZE - this.BTN_MARGIN);
+    this.btnDragX = Math.min(maxDx, Math.max(minDx, this.btnDragX));
+    this.btnDragY = Math.min(maxDy, Math.max(minDy, this.btnDragY));
+  }
+
+  // 收起「长按可拖动」提示
+  private dismissRefreshHint(): void {
+    this.showRefreshHint = false;
+    if (this.refreshHintTimer !== -1) {
+      clearTimeout(this.refreshHintTimer);
+      this.refreshHintTimer = -1;
+    }
+  }
+
+  // 保存刷新按钮位置（拖动结束时调用）
+  private saveButtonOffset(): void {
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      saveRefreshButtonOffset(ctx, this.btnDragX, this.btnDragY);
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to save refresh button offset');
+    }
+  }
+
+  /**
+   * 刷新确认弹窗控制器。
+   *
+   * 官方确认框（promptAction.showDialog）不支持内嵌勾选框，因此按官方推荐做法
+   * 用 @CustomDialog 自定义弹窗内容（见 components/RefreshConfirmDialog.ets），
+   * 内部用官方 Checkbox 组件实现「不再显示」。
+   *
+   * customStyle 保持默认 false：由框架提供弹窗容器（含圆角与背景），
+   * 组件只负责内部内容，尺寸最稳妥。
+   */
+  private refreshConfirmDialog: CustomDialogController = new CustomDialogController({
+    builder: RefreshConfirmDialog({
+      noMore: $noMoreRefreshPrompt,
+      onConfirm: (noMore: boolean) => {
+        this.onRefreshConfirmed(noMore);
+      },
+      onCancel: () => {
+        // 取消：仅关闭弹窗，不做其它处理
+      }
+    }),
+    autoCancel: true,
+    alignment: DialogAlignment.Center
+  });
+
+  // 弹出刷新确认框（调用方已确认用户没有勾选过「不再显示」）
+  private showRefreshConfirm(): void {
+    this.noMoreRefreshPrompt = false;
+    try {
+      this.refreshConfirmDialog.open();
+      hilog.info(DOMAIN, TAG, 'Refresh confirm dialog opened');
+    } catch (err) {
+      // 弹窗失败不能让刷新功能不可用：直接刷新
+      hilog.warn(DOMAIN, TAG, 'Failed to open refresh confirm dialog, refresh directly');
+      this.doRefresh();
+    }
+  }
+
+  // 关闭刷新确认框（供需要程序化关闭的场景使用；按钮点击由弹窗组件自行关闭）
+  private closeRefreshConfirm(): void {
+    try {
+      this.refreshConfirmDialog.close();
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to close refresh confirm dialog');
+    }
+  }
+
+  // 用户点「继续刷新」：弹窗此时已自行关闭；若勾选了「不再显示」则持久化，随后执行刷新
+  private onRefreshConfirmed(noMore: boolean): void {
+    if (noMore && !this.refreshSkipConfirm) {
+      this.refreshSkipConfirm = true;
+      try {
+        const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+        setRefreshConfirmSkipped(ctx, true);
+        hilog.info(DOMAIN, TAG, 'Refresh confirm disabled by user');
+      } catch (err) {
+        hilog.warn(DOMAIN, TAG, 'Failed to persist refresh confirm skipped flag');
+      }
+    }
+    this.doRefresh();
+  }
+
+  // 实际执行刷新
+  private doRefresh(): void {
+    try {
+      this.controller.refresh();
+      hilog.info(DOMAIN, TAG, 'Page refreshed');
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'Refresh failed');
+    }
+  }
+
+  /**
+   * 设置面板内容。
+   * 用官方组件（Toggle / Divider）与项目既有的语义化颜色资源，
+   * 深浅色由资源限定词自动适配，与页面其它部分风格一致。
+   */
+  @Builder
+  settingsSheet() {
+    Column() {
+      // 标题栏自绘，配合 bindSheet 里的 showClose: false 使用。
+      //
+      // 为什么必须自绘：手机端用的 SheetType.CONTENT_COVER 是「内容全屏覆盖」形态，
+      // 系统在该形态下**不渲染标题栏与关闭按钮**（真机截图可见面板没有标题也没有 ✕，
+      // 只能靠返回手势退出）。而 CENTER 形态（平板）系统会渲染，所以那里必须
+      // 显式关掉 showClose，否则系统那颗与自绘的会叠在同一位置 —— 表现为一个
+      // 「圆形斜线 + 叉」的怪异图标，容易被误判为字形缺失。
+      Row() {
+        Text($r('app.string.settings_title'))
+          .fontSize(20)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.text_primary'))
+          .layoutWeight(1)
+        // 关闭：官方符号 xmark（系统资源码位 0xF0056），外面套一个圆形浅底并加阴影，
+        // 与系统半模态自带的关闭按钮观感一致（系统那颗也是「圆形浅底 + 叉」）。
+        // 用 Row 包一层是为了确保符号在圆内居中，SymbolGlyph 直接设宽高不保证居中。
+        Row() {
+          SymbolGlyph($r('sys.symbol.xmark'))
+            .fontSize(16)
+            .fontColor([$r('app.color.text_secondary')])
+        }
+        .width(36)
+        .height(36)
+        .borderRadius(18)
+        .backgroundColor($r('app.color.surface_tile'))
+        .justifyContent(FlexAlign.Center)
+        .alignItems(VerticalAlign.Center)
+        .shadow({
+          radius: 8,
+          color: $r('app.color.floating_button_shadow'),
+          offsetX: 0,
+          offsetY: 2
+        })
+        .onClick(() => {
+          this.showSettings = false;
+        })
+      }
+      .width('100%')
+      .height(56)
+      .padding({ left: 20, right: 12, top: 8 })
+      .alignItems(VerticalAlign.Center)
+
+      Divider().color($r('app.color.progress_track')).opacity(0.15)
+
+      // 刷新按钮开关
+      Row() {
+        Column() {
+          Text($r('app.string.settings_refresh_button'))
+            .fontSize(15)
+            .fontColor($r('app.color.text_primary'))
+          Text($r('app.string.settings_refresh_button_desc'))
+            .fontSize(12)
+            .fontColor($r('app.color.text_secondary'))
+            .margin({ top: 3 })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+
+        Toggle({ type: ToggleType.Switch, isOn: this.refreshButtonEnabled })
+          .onChange((isOn: boolean) => {
+            this.onToggleRefreshButton(isOn);
+          })
+      }
+      .width('100%')
+      .padding({ left: 20, right: 20, top: 16, bottom: 16 })
+      .alignItems(VerticalAlign.Center)
+
+      Divider().color($r('app.color.progress_track')).opacity(0.15)
+
+      // 清理应用缓存
+      Row() {
+        Column() {
+          Text($r('app.string.settings_clear_cache'))
+            .fontSize(15)
+            .fontColor($r('app.color.text_primary'))
+          Text($r('app.string.settings_clear_cache_desc'))
+            .fontSize(12)
+            .fontColor($r('app.color.text_secondary'))
+            .margin({ top: 3 })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+      }
+      .width('100%')
+      .padding({ left: 20, right: 20, top: 16, bottom: 16 })
+      .onClick(() => {
+        this.clearAppCache();
+      })
+
+      Divider().color($r('app.color.progress_track')).opacity(0.15)
+
+      // 问题反馈：按官方规范用 Want(action=viewData + browsable) 交给系统浏览器打开，
+      // 不走应用内 WebView —— 用户需要看到地址栏，也便于登录 GitHub。
+      Row() {
+        Column() {
+          Text($r('app.string.settings_feedback'))
+            .fontSize(15)
+            .fontColor($r('app.color.text_primary'))
+          Text($r('app.string.settings_feedback_desc'))
+            .fontSize(12)
+            .fontColor($r('app.color.text_secondary'))
+            .margin({ top: 3 })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+
+        SymbolGlyph($r('sys.symbol.arrow_right_up_and_square'))
+          .fontSize(16)
+          .fontColor([$r('app.color.text_secondary')])
+      }
+      .width('100%')
+      .padding({ left: 20, right: 20, top: 16, bottom: 16 })
+      .alignItems(VerticalAlign.Center)
+      .onClick(() => {
+        this.openInSystemBrowser(FEEDBACK_URL);
+      })
+    }
+    .width('100%')
+    .backgroundColor($r('app.color.surface_card'))
+  }
+
+  // 设置面板：刷新按钮开关，立即生效并持久化
+  private onToggleRefreshButton(enabled: boolean): void {
+    this.refreshButtonEnabled = enabled;
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      setRefreshButtonEnabled(ctx, enabled);
+      hilog.info(DOMAIN, TAG, 'Refresh button enabled: %{public}s', String(enabled));
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to persist refresh button enabled flag');
+    }
+  }
+
+  /**
+   * 设置面板：清理应用缓存。
+   * removeCache(true) 清除 ROM + RAM 中的网页缓存（官方 API：作用于同应用内所有 Web 组件），
+   * **不涉及 Cookie / DOM Storage**，因此登录状态与主题偏好会保留。
+   */
+  private clearAppCache(): void {
+    try {
+      this.controller.removeCache(true);
+      hilog.info(DOMAIN, TAG, 'Web cache cleared');
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'removeCache failed');
+    }
+    try {
+      this.getUIContext().getPromptAction().showToast({
+        message: $r('app.string.toast_cache_cleared'),
+        duration: 2000
+      });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to show cache toast');
     }
   }
 
@@ -970,12 +1542,40 @@ struct Index {
     }
   }
 
+  /**
+   * 构造文件选择器的分组筛选条件。
+   *
+   * 扩展名数据来自 AllowedFileExtensions（纯数据，不含任何文字）；
+   * 分组描述在此按**系统语言**取资源后拼接 —— 这样系统文档选择器里的
+   * 「图片 / 文档 / 文本 / 代码 / 数据」会跟随系统语言，而不是固定显示中文。
+   */
+  private buildFileSuffixFilters(context: common.UIAbilityContext): Array<string> {
+    const labels: Array<Resource> = [
+      $r('app.string.filter_image'),
+      $r('app.string.filter_doc'),
+      $r('app.string.filter_text'),
+      $r('app.string.filter_code'),
+      $r('app.string.filter_data')
+    ];
+    try {
+      const filters: Array<string> = [];
+      for (let i = 0; i < UPLOAD_FILTER_EXTENSIONS.length && i < labels.length; i++) {
+        filters.push(context.resourceManager.getStringSync(labels[i].id) + UPLOAD_FILTER_EXTENSIONS[i]);
+      }
+      return filters;
+    } catch (err) {
+      // 取不到资源时退回纯扩展名，至少不影响选择文件
+      hilog.warn(DOMAIN, TAG, 'Failed to build file suffix filters, fallback to raw extensions');
+      return UPLOAD_FILTER_EXTENSIONS;
+    }
+  }
+
   // 文件：使用 DocumentViewPicker 选择通用文件
   private handlePickFile(): void {
     try {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const docOptions = new picker.DocumentSelectOptions();
-      docOptions.fileSuffixFilters = ALLOWED_UPLOAD_EXTENSIONS;
+      docOptions.fileSuffixFilters = this.buildFileSuffixFilters(context);
       const docPicker = new picker.DocumentViewPicker(context);
       docPicker.select(docOptions).then((docResult) => {
         if (docResult && docResult.length > 0 && this.pendingFileListHandler) {

@@ -4,7 +4,7 @@
   <img src="assets/app_icon.png" width="160" alt="DeepSeek for HarmonyOS">
 </p>
 
-基于 HarmonyOS WebView 封装的 DeepSeek 客户端，支持手机、平板和 2in1。
+基于 HarmonyOS WebView 封装的 DeepSeek 鸿蒙客户端，支持手机、平板和 2in1。
 
 ---
 
@@ -76,7 +76,7 @@ entry/src/main/ets/
 
 ## 版本
 
-`dev.cyotatsu.deepseek.oh` — v1.1.4.1 (1001041)
+`dev.cyotatsu.deepseek.oh` — v1.1.4.2 (1001042)
 
 ## License
 

@@ -75,6 +75,94 @@
     {
       "name": "network_info_reason",
       "value": "Используется для проверки состояния сети и более понятных сообщений об ошибках"
+    },
+    {
+      "name": "refresh_drag_hint",
+      "value": "Долгое нажатие — переместить"
+    },
+    {
+      "name": "settings_title",
+      "value": "Настройки"
+    },
+    {
+      "name": "settings_refresh_button",
+      "value": "Кнопка обновления"
+    },
+    {
+      "name": "settings_refresh_button_desc",
+      "value": "Показывать кнопку обновления"
+    },
+    {
+      "name": "settings_clear_cache",
+      "value": "Очистить кеш приложения"
+    },
+    {
+      "name": "settings_clear_cache_desc",
+      "value": "Очищает только веб-кеш; вход сохраняется"
+    },
+    {
+      "name": "toast_cache_cleared",
+      "value": "Кеш очищен"
+    },
+    {
+      "name": "settings_feedback",
+      "value": "Обратная связь"
+    },
+    {
+      "name": "settings_feedback_desc",
+      "value": "Открывает страницу отзывов в браузере"
+    },
+    {
+      "name": "browser_confirm_title",
+      "value": "Выход из приложения"
+    },
+    {
+      "name": "browser_confirm_message",
+      "value": "Внешняя страница откроется в браузере. Продолжить?"
+    },
+    {
+      "name": "common_cancel",
+      "value": "Отмена"
+    },
+    {
+      "name": "common_agree",
+      "value": "Согласен"
+    },
+    {
+      "name": "filter_image",
+      "value": "Изображения"
+    },
+    {
+      "name": "filter_doc",
+      "value": "Документы"
+    },
+    {
+      "name": "filter_text",
+      "value": "Текст"
+    },
+    {
+      "name": "filter_code",
+      "value": "Код"
+    },
+    {
+      "name": "filter_data",
+      "value": "Данные"
+    },
+    {
+      "name": "refresh_confirm_title",
+      "value": "Обновить страницу"
+    },
+    {
+      "name": "refresh_confirm_message",
+      "value": "После обновления несохранённый текст будет потерян"
+    },
+    {
+      "name": "refresh_confirm_no_more",
+      "value": "Больше не показывать"
+    },
+    {
+      "name": "refresh_confirm_ok",
+      "value": "Всё равно обновить"
     }
   ]
 }

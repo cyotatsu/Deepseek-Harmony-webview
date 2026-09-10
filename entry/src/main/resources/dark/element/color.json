@@ -71,6 +71,10 @@
     {
       "name": "progress_track",
       "value": "#00FFFFFF"
+    },
+    {
+      "name": "floating_button_bg_active",
+      "value": "#F23C3C3C"
     }
   ]
 }

@@ -10,3 +10,6 @@ export const DEEPSEEK_URL: string = 'https://chat.deepseek.com/';
 
 /** DeepSeek 网页版域名，用于同域判断与分享链接识别 */
 export const DEEPSEEK_HOST: string = 'chat.deepseek.com';
+
+/** 问题反馈地址（设置面板中点击后交给系统浏览器打开） */
+export const FEEDBACK_URL: string = 'https://github.com/cyotatsu/Deepseek-Harmony-webview/pulls';

@@ -77,7 +77,7 @@ export default class EntryAbility extends UIAbility {
     if (currentColorMode !== newColorMode) {
       AppStorage.setOrCreate<ConfigurationConstant.ColorMode>('currentColorMode', newColorMode);
       hilog.info(DOMAIN, TAG, 'ColorMode changed: %{public}d -> %{public}d', currentColorMode, newColorMode);
-      this.applyStatusBarStyle();
+      this.applyWindowBackground(newColorMode);
     }
 
     // 监听系统语言变化，同步更新 AppStorage
@@ -118,60 +118,25 @@ export default class EntryAbility extends UIAbility {
           hilog.warn(DOMAIN, TAG, 'setWindowBackgroundColor not supported');
         }
 
-        // 手机/平板：窗口沉浸式布局，内容延伸至状态栏后方
-        // setWindowLayoutFullScreen 已废弃，使用 setImmersiveModeEnabledState 替代
-        try {
-          mainWindowClass.setImmersiveModeEnabledState(true);
-          hilog.info(DOMAIN, TAG, 'Immersive mode enabled');
-        } catch (err) {
-          hilog.warn(DOMAIN, TAG, 'setImmersiveModeEnabledState not supported');
-        }
-
-        // 系统标题栏的显隐按窗口模式决定，而不是一律隐藏。
+        // 窗口形态交由系统管理，不做自定义窗口部件：
+        //   · 不启用旧式沉浸（setImmersiveModeEnabledState）
+        //   · 不隐藏系统标题栏（setWindowDecorVisible）
+        //   · 不改标题栏高度（setWindowDecorHeight）
+        // 标题栏、状态栏，以及拖动 / 最大化 / 最小化 / 关闭全部由系统按官方规范提供。
         //
-        // 应用市场、设置等系统应用从不隐藏系统标题栏，因此它们在自由多窗下天然带有
-        // 「图标 + 应用名 + 最大化/最小化/关闭」，也天然可以拖动窗口。本应用为沉浸
-        // 外观隐藏了标题栏 —— 而 SDK 说明指出：标题栏隐藏后，主窗口进入全屏时
-        // **只有鼠标光标悬停热区**才会浮出标题栏；触屏没有悬停，于是自由多窗下既没有
-        // 应用标识、也没有拖动入口。
-        //
-        // 因此：自由多窗下保留系统标题栏（与其它应用表现一致，且它是拖动窗口的唯一
-        // 入口）；其余形态（含平板正常使用时的全屏）维持隐藏以保持沉浸。
-        const applyDecor = (win: window.Window | null): void => {
-          if (!win) {
-            return;
-          }
-          let keepDecor: boolean = true;
-          try {
-            keepDecor = win.isInFreeWindowMode();
-          } catch (err) {
-            hilog.warn(DOMAIN, TAG, 'isInFreeWindowMode not available, keep decor shown');
-          }
-          try {
-            win.setWindowDecorVisible(keepDecor);
-            hilog.info(DOMAIN, TAG, 'Window decor visible: %{public}s', String(keepDecor));
-          } catch (err) {
-            hilog.warn(DOMAIN, TAG, 'setWindowDecorVisible not available');
-          }
-        };
-        applyDecor(mainWindowClass);
+        // 仅额外开启「底部沉浸」：让布局延伸到系统栏区域，使内容铺到屏幕最底部。
+        // 官方现状：全面屏手势导航条本身就是透明的，但它的颜色**无法单独设置**
+        // （SystemBarProperties.navigationBarColor 只对传统三键导航栏生效），
+        // 因此底部沉浸的唯一做法是 setWindowLayoutFullScreen(true) 取消默认避让，
+        // 再由页面把底部 padding 留为 0。
+        // 顶部不做沉浸：页面会按状态栏避让高度补 padding，视觉上仍是一条正常状态栏，
+        // 那里用 statusBarContentColor 保证图标/文字可读。
         try {
-          mainWindowClass.on('freeWindowModeChange', (inFreeWindowMode: boolean) => {
-            hilog.info(DOMAIN, TAG, 'Free window mode changed: %{public}s', String(inFreeWindowMode));
-            applyDecor(mainWindowClass);
-          });
+          mainWindowClass.setWindowLayoutFullScreen(true);
+          hilog.info(DOMAIN, TAG, 'Layout full screen enabled (bottom immersive)');
         } catch (err) {
-          hilog.warn(DOMAIN, TAG, 'freeWindowModeChange listener not available');
+          hilog.warn(DOMAIN, TAG, 'setWindowLayoutFullScreen not supported');
         }
-        try {
-          mainWindowClass.setWindowDecorHeight(40);
-          hilog.info(DOMAIN, TAG, 'Window decor height set to 40');
-        } catch (err) {
-          hilog.warn(DOMAIN, TAG, 'setWindowDecorHeight not available');
-        }
-
-        // 初始设置状态栏内容颜色（根据当前模式）
-        this.applyStatusBarStyle();
       }
     });
   }
@@ -182,6 +147,10 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     hilog.info(DOMAIN, TAG, 'Ability onForeground');
+    // 回到前台时按当前模式重新同步一次状态栏/窗口底色：
+    // 深色模式可能在应用处于后台期间被系统改过，而那种情况下
+    // onConfigurationUpdate 不保证会触发。此处不传参，读 context.config 即为最新值。
+    this.applyWindowBackground();
   }
 
   onBackground(): void {
@@ -189,46 +158,55 @@ export default class EntryAbility extends UIAbility {
   }
 
   /**
-   * 设置状态栏透明 + 窗口背景 + 内容颜色跟随深色/浅色模式
-   * 手机端：状态栏背景透明，透出 DeepSeek 网页顶部背景色
-   * 2in1端：窗口背景色与 DeepSeek 官网一致，隐藏标题栏 logo/文字后实现沉浸
+   * 按深浅色模式设置窗口背景色与状态栏文字颜色。
+   *
+   * 背景色与 DeepSeek 官网保持一致，避免启动闪白/闪黑。
+   * 状态栏文字颜色必须设置：底部沉浸开启后布局延伸到系统栏区域，状态栏变为透明、
+   * 透出应用底色，若不反色会出现「白底白字」不可读。
+   *
+   * @param colorMode 调用方显式传入的新模式。**必须由 onConfigurationUpdate 传入** ——
+   *   该方法触发时 this.context.config 可能尚未更新，若在此处重新读取会拿到旧值，
+   *   导致切换深浅色后状态栏不反色。不传则回退到 context.config（启动时使用）。
    */
-  private applyStatusBarStyle(): void {
+  private applyWindowBackground(colorMode?: ConfigurationConstant.ColorMode): void {
     if (!mainWindowClass) {
       return;
     }
-    const isDark: boolean =
-      this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+    // 取值优先级：调用方显式传入 > context.config（启动/回前台时）
+    // context.config.colorMode 本身是可选字段，取不到时按「未设置」处理（等同浅色）。
+    let mode: ConfigurationConstant.ColorMode;
+    if (colorMode !== undefined) {
+      mode = colorMode;
+    } else {
+      const ctxMode: ConfigurationConstant.ColorMode | undefined = this.context.config.colorMode;
+      mode = ctxMode !== undefined ? ctxMode : ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET;
+    }
+    const isDark: boolean = mode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
 
-    // 状态栏透明 + 内容文字颜色适配。
-    // setWindowSystemBarProperties 在 2in1 上不生效（SDK 文档明确说明
-    // "This API does not take effect on 2-in-1 devices"），故 2in1 直接跳过，
-    // 既省掉一次无意义的异步调用，也避免打出会误导排查的 "StatusBar updated" 日志。
+    // 浅色→#FFFFFFFF（白）  深色→#FF1A1A1A（暗）
+    try {
+      const winBgColor: string = isDark ? '#FF1A1A1A' : '#FFFFFFFF';
+      mainWindowClass.setWindowBackgroundColor(winBgColor);
+      hilog.info(DOMAIN, TAG, 'Window bg color set: %{public}s (isDark=%{public}s)',
+        winBgColor, String(isDark));
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'setWindowBackgroundColor not supported');
+    }
+
+    // 状态栏文字反色。setWindowSystemBarProperties 在 2in1 上不生效（SDK 明确说明），
+    // 故 2in1 直接跳过，避免无谓的异步调用与误导性日志。
     if (deviceInfo.deviceType !== '2in1') {
-      const sysBarProps: window.SystemBarProperties = {
-        statusBarColor: '#00000000',
-        statusBarContentColor: isDark ? '#FFFFFF' : '#000000'
-      };
       try {
-        mainWindowClass.setWindowSystemBarProperties(sysBarProps).then(() => {
-          hilog.info(DOMAIN, TAG, 'StatusBar updated');
+        mainWindowClass.setWindowSystemBarProperties({
+          statusBarContentColor: isDark ? '#FFFFFF' : '#000000'
+        }).then(() => {
+          hilog.info(DOMAIN, TAG, 'Status bar content color set (isDark=%{public}s)', String(isDark));
         }).catch((err: BusinessError) => {
           hilog.warn(DOMAIN, TAG, 'setWindowSystemBarProperties failed: %{public}d', err.code);
         });
       } catch (err) {
-        hilog.warn(DOMAIN, TAG, 'applyStatusBarStyle exception');
+        hilog.warn(DOMAIN, TAG, 'setWindowSystemBarProperties exception');
       }
-    }
-
-    // 设置窗口背景色，与 DeepSeek 官网颜色一致
-    // 浅色→#FFFFFFFF（白）  深色→#FF1A1A1A（暗）
-    // 2in1端隐藏标题栏后，窗口背景会从标题栏区域透出，颜色需与网页顶部一致
-    try {
-      const winBgColor: string = isDark ? '#FF1A1A1A' : '#FFFFFFFF';
-      mainWindowClass.setWindowBackgroundColor(winBgColor);
-      hilog.info(DOMAIN, TAG, 'Window bg color set: %{public}s', winBgColor);
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'setWindowBackgroundColor not supported');
     }
   }
 
