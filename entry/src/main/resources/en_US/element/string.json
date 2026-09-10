@@ -75,6 +75,94 @@
     {
       "name": "network_info_reason",
       "value": "Used to check network connectivity and provide clearer error prompts"
+    },
+    {
+      "name": "refresh_drag_hint",
+      "value": "Long-press to move"
+    },
+    {
+      "name": "settings_title",
+      "value": "Settings"
+    },
+    {
+      "name": "settings_refresh_button",
+      "value": "Refresh button"
+    },
+    {
+      "name": "settings_refresh_button_desc",
+      "value": "Show the one-tap refresh button"
+    },
+    {
+      "name": "settings_clear_cache",
+      "value": "Clear app cache"
+    },
+    {
+      "name": "settings_clear_cache_desc",
+      "value": "Clears web cache only; you stay signed in"
+    },
+    {
+      "name": "toast_cache_cleared",
+      "value": "Cache cleared"
+    },
+    {
+      "name": "settings_feedback",
+      "value": "Feedback"
+    },
+    {
+      "name": "settings_feedback_desc",
+      "value": "Opens the feedback page in your browser"
+    },
+    {
+      "name": "browser_confirm_title",
+      "value": "Leaving the app"
+    },
+    {
+      "name": "browser_confirm_message",
+      "value": "This will open an external page in your browser. Continue?"
+    },
+    {
+      "name": "common_cancel",
+      "value": "Cancel"
+    },
+    {
+      "name": "common_agree",
+      "value": "Agree"
+    },
+    {
+      "name": "filter_image",
+      "value": "Images"
+    },
+    {
+      "name": "filter_doc",
+      "value": "Documents"
+    },
+    {
+      "name": "filter_text",
+      "value": "Text"
+    },
+    {
+      "name": "filter_code",
+      "value": "Code"
+    },
+    {
+      "name": "filter_data",
+      "value": "Data"
+    },
+    {
+      "name": "refresh_confirm_title",
+      "value": "Refresh page"
+    },
+    {
+      "name": "refresh_confirm_message",
+      "value": "After refreshing, any unsaved input will be lost"
+    },
+    {
+      "name": "refresh_confirm_no_more",
+      "value": "Don't show again"
+    },
+    {
+      "name": "refresh_confirm_ok",
+      "value": "Refresh anyway"
     }
   ]
 }

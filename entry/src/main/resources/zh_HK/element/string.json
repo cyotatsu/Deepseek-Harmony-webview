@@ -75,6 +75,94 @@
     {
       "name": "network_info_reason",
       "value": "用於偵測網絡連線狀態，提供更清楚的網絡異常提示"
+    },
+    {
+      "name": "refresh_drag_hint",
+      "value": "長按可拖動"
+    },
+    {
+      "name": "settings_title",
+      "value": "設定"
+    },
+    {
+      "name": "settings_refresh_button",
+      "value": "重新整理按鈕"
+    },
+    {
+      "name": "settings_refresh_button_desc",
+      "value": "顯示一鍵重新整理按鈕"
+    },
+    {
+      "name": "settings_clear_cache",
+      "value": "清理應用程式快取"
+    },
+    {
+      "name": "settings_clear_cache_desc",
+      "value": "清除網頁快取，不影響登入狀態"
+    },
+    {
+      "name": "toast_cache_cleared",
+      "value": "已清理快取"
+    },
+    {
+      "name": "settings_feedback",
+      "value": "問題回報"
+    },
+    {
+      "name": "settings_feedback_desc",
+      "value": "在系統瀏覽器中開啟回報頁面"
+    },
+    {
+      "name": "browser_confirm_title",
+      "value": "即將離開應用程式"
+    },
+    {
+      "name": "browser_confirm_message",
+      "value": "將在系統瀏覽器中開啟外部頁面，是否繼續？"
+    },
+    {
+      "name": "common_cancel",
+      "value": "取消"
+    },
+    {
+      "name": "common_agree",
+      "value": "同意"
+    },
+    {
+      "name": "filter_image",
+      "value": "圖片"
+    },
+    {
+      "name": "filter_doc",
+      "value": "文件"
+    },
+    {
+      "name": "filter_text",
+      "value": "文字"
+    },
+    {
+      "name": "filter_code",
+      "value": "程式碼"
+    },
+    {
+      "name": "filter_data",
+      "value": "資料"
+    },
+    {
+      "name": "refresh_confirm_title",
+      "value": "重新整理頁面"
+    },
+    {
+      "name": "refresh_confirm_message",
+      "value": "重新整理後，未提交的內容將會遺失"
+    },
+    {
+      "name": "refresh_confirm_no_more",
+      "value": "不再顯示"
+    },
+    {
+      "name": "refresh_confirm_ok",
+      "value": "繼續重新整理"
     }
   ]
 }

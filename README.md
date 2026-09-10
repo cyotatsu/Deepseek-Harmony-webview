@@ -76,7 +76,7 @@ entry/src/main/ets/
 
 ## 版本
 
-`dev.cyotatsu.deepseek.oh` — v1.1.4.1 (1001041)
+`dev.cyotatsu.deepseek.oh` — v1.1.4.2 (1001042)
 
 ## License
 

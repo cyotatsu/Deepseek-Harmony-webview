@@ -75,6 +75,94 @@
     {
       "name": "toast_save_done",
       "value": "已保存到下载目录"
+    },
+    {
+      "name": "refresh_drag_hint",
+      "value": "长按可拖动"
+    },
+    {
+      "name": "settings_title",
+      "value": "设置"
+    },
+    {
+      "name": "settings_refresh_button",
+      "value": "刷新按钮"
+    },
+    {
+      "name": "settings_refresh_button_desc",
+      "value": "显示一键刷新按钮"
+    },
+    {
+      "name": "settings_clear_cache",
+      "value": "清理应用缓存"
+    },
+    {
+      "name": "settings_clear_cache_desc",
+      "value": "清除网页缓存，不影响登录状态"
+    },
+    {
+      "name": "toast_cache_cleared",
+      "value": "已清理缓存"
+    },
+    {
+      "name": "settings_feedback",
+      "value": "问题反馈"
+    },
+    {
+      "name": "settings_feedback_desc",
+      "value": "在系统浏览器中打开反馈页面"
+    },
+    {
+      "name": "browser_confirm_title",
+      "value": "即将离开应用"
+    },
+    {
+      "name": "browser_confirm_message",
+      "value": "将在系统浏览器中打开外部页面，是否继续？"
+    },
+    {
+      "name": "common_cancel",
+      "value": "取消"
+    },
+    {
+      "name": "common_agree",
+      "value": "同意"
+    },
+    {
+      "name": "filter_image",
+      "value": "图片"
+    },
+    {
+      "name": "filter_doc",
+      "value": "文档"
+    },
+    {
+      "name": "filter_text",
+      "value": "文本"
+    },
+    {
+      "name": "filter_code",
+      "value": "代码"
+    },
+    {
+      "name": "filter_data",
+      "value": "数据"
+    },
+    {
+      "name": "refresh_confirm_title",
+      "value": "刷新页面"
+    },
+    {
+      "name": "refresh_confirm_message",
+      "value": "刷新页面后，未提交的内容将会丢失"
+    },
+    {
+      "name": "refresh_confirm_no_more",
+      "value": "不再显示"
+    },
+    {
+      "name": "refresh_confirm_ok",
+      "value": "继续刷新"
     }
   ]
 }
