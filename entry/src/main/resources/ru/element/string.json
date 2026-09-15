@@ -1,6 +1,34 @@
 {
   "string": [
     {
+      "name": "microphone_reason",
+      "value": "Для голосового ввода на веб-странице"
+    },
+    {
+      "name": "a11y_back",
+      "value": "Назад"
+    },
+    {
+      "name": "a11y_refresh",
+      "value": "Обновить страницу"
+    },
+    {
+      "name": "common_close",
+      "value": "Закрыть"
+    },
+    {
+      "name": "permission_request_title",
+      "value": "Запрос разрешения"
+    },
+    {
+      "name": "permission_request_mic",
+      "value": "Веб-страница запрашивает доступ к микрофону (голосовой ввод). Разрешить?"
+    },
+    {
+      "name": "common_deny",
+      "value": "Запретить"
+    },
+    {
       "name": "error_network_title",
       "value": "Нет сети"
     },
@@ -55,6 +83,10 @@
     {
       "name": "toast_save_done",
       "value": "Сохранено в Загрузки"
+    },
+    {
+      "name": "toast_back_again_to_exit",
+      "value": "Нажмите «Назад» ещё раз, чтобы выйти"
     },
     {
       "name": "module_desc",

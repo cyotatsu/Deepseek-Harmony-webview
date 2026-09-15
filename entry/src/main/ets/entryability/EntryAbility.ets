@@ -7,6 +7,7 @@ import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { i18n } from '@kit.LocalizationKit';
 import { DEEPSEEK_URL, DEEPSEEK_HOST } from '../common/AppConfig';
 import { cleanupPhotoTempFiles } from '../common/PhotoTempFiles';
+import { cleanupDownloadTempFiles } from '../common/DownloadFiles';
 
 const DOMAIN = 0x0001;
 const TAG = 'DeepSeekEntryAbility';
@@ -54,6 +55,9 @@ export default class EntryAbility extends UIAbility {
     // handleTakePhoto 预创建的文件在上传成功后不便立即删除（WebView 可能仍在校验读取），
     // 因此改为启动时统一清理 —— 此刻不可能有上传在进行，安全且能让目录自愈。
     cleanupPhotoTempFiles(this.context.filesDir);
+    // 同上：清理上次运行遗留的下载中转文件（cacheDir/web）。下载完成时已主动删除，
+    // 但进程被杀、保存对话框未走完等情况下仍会残留，启动时统一回收。
+    cleanupDownloadTempFiles(this.context.cacheDir);
 
     // 非DeepLink启动：清空残留URL，防止旧值干扰
     if (!want?.uri) {
@@ -95,7 +99,9 @@ export default class EntryAbility extends UIAbility {
     hilog.info(DOMAIN, TAG, 'Ability onWindowStageCreate');
 
     windowStage.loadContent('pages/Index', (err) => {
-      if (err.code) {
+      // err 可能为 undefined（该回调在部分版本下成功时传 undefined），
+      // 直接访问 err.code 会抛异常，导致后面的窗口初始化整段被跳过。
+      if (err && err.code) {
         hilog.error(DOMAIN, TAG, 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));
         return;
       }
