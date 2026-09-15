@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "dev.cyotatsu.deepseek.oh",
     "vendor": "cyotatsu",
-    "versionCode": 1001042,
-    "versionName": "1.1.4.2",
+    "versionCode": 1001043,
+    "versionName": "1.1.4.3",
     "buildVersion": "1",
     "icon": "$media:layered_image",
     "label": "$string:app_name"

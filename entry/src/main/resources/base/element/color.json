@@ -17,10 +17,6 @@
       "value": "#999999"
     },
     {
-      "name": "text_body",
-      "value": "#666666"
-    },
-    {
       "name": "text_on_accent",
       "value": "#FFFFFF"
     },
@@ -63,10 +59,6 @@
     {
       "name": "drag_indicator",
       "value": "#59000000"
-    },
-    {
-      "name": "drag_indicator_bg",
-      "value": "#0F000000"
     },
     {
       "name": "progress_track",

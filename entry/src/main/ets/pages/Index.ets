@@ -1,5 +1,5 @@
 import { webview } from '@kit.ArkWeb';
-import { common, Want } from '@kit.AbilityKit';
+import { bundleManager, common, Want } from '@kit.AbilityKit';
 import { systemShare } from '@kit.ShareKit';
 import { uniformTypeDescriptor as utd } from '@kit.ArkData';
 import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
@@ -9,22 +9,58 @@ import { resourceManager, i18n } from '@kit.LocalizationKit';
 import { connection } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window, promptAction } from '@kit.ArkUI';
-import { url } from '@kit.ArkTS';
+import { inputMethod } from '@kit.IMEKit';
 import { camera, cameraPicker } from '@kit.CameraKit';
 import { UPLOAD_FILTER_EXTENSIONS } from '../common/AllowedFileExtensions';
-import { DEEPSEEK_URL, DEEPSEEK_HOST, FEEDBACK_URL } from '../common/AppConfig';
-import { isDeepSeekDomain, isDownloadUrl } from '../common/UrlRules';
+import { DEEPSEEK_URL, DEEPSEEK_HOST, FEEDBACK_URL,
+  SHARE_SCHEME_PREFIX, UA_PRODUCT_PREFIX } from '../common/AppConfig';
+import { isChatHost, isDeepSeekDomain, isDownloadUrl, isChatRootPage }
+  from '../common/UrlRules';
 import { toBCP47 } from '../common/LanguageUtil';
 import { buildPhotoTempPath } from '../common/PhotoTempFiles';
+import { sanitizeFileName, buildDownloadTempPath, fileNameFromTempPath,
+  ensureDownloadTempDir, removeDownloadTempFile } from '../common/DownloadFiles';
+import { ensurePermission, MICROPHONE_PERMISSION } from '../common/AppPermissions';
+import { buildUserAgent, buildViewportFixScript, buildResizeNotifyScript,
+  buildProbeScript, buildOverlayProbeScript, buildOverlayDismissScript, parseOverlayKind,
+  isDismissClicked, buildComposerAutoHideScript, buildKeyboardStateScript, buildRetryFocusScript,
+  VIEWPORT_RESIZE_DEBOUNCE_MS } from '../common/WebViewport';
+import { buildFocusGuardScript, ENABLE_IMAGE_TAP_FOCUS_GUARD } from '../common/WebInputGuard';
+import { decideBackAction, BackContext, EXIT_CONFIRM_WINDOW_MS,
+  BACK_ACTION_DISMISS_MODAL, BACK_ACTION_DISMISS_OVERLAY, BACK_ACTION_WEB_BACK,
+  BACK_ACTION_PROMPT_EXIT } from '../common/BackPolicy';
 import { PageProgress } from '../components/PageProgress';
 import { ErrorView } from '../components/ErrorView';
 import { RefreshConfirmDialog } from '../components/RefreshConfirmDialog';
-import { loadRefreshButtonOffset, saveRefreshButtonOffset, isRefreshHintShown,
-  markRefreshHintShown, isRefreshButtonEnabled, setRefreshButtonEnabled,
+import { FloatingBar } from '../components/FloatingBar';
+import { SettingsSheet } from '../components/SettingsSheet';
+import { UploadSheet } from '../components/UploadSheet';
+import { isRefreshButtonEnabled, setRefreshButtonEnabled,
   isRefreshConfirmSkipped, setRefreshConfirmSkipped } from '../common/UiPrefs';
 
 const DOMAIN = 0x0001;
 const TAG = 'DeepSeekIndex';
+/**
+ * 真机调参用的**定时诊断取样**间隔（毫秒）；0 = 关闭。
+ *
+ * 为什么需要它：探针原本只在 onPageEnd / onPageShow 触发，而这两处都无法在
+ * 「输入了长文本、键盘正开着」的那一刻取样（`aa start` 不会让已在前台的页面重新
+ * onPageShow，HOME 键也未必真让应用切后台）。定位 composer 布局问题时必须能在任意
+ * 时刻取样，因此留了这个开关。
+ *
+ * **仅用于排查问题，定位完成后应改回 0** —— 打开后会周期性打印一条较长的诊断日志。
+ */
+const DEBUG_PROBE_INTERVAL_MS: number = 0;
+
+/**
+ * 返回手势决策里「查网页弹层」这一步的兜底超时（毫秒）。
+ *
+ * onBackPress 必须同步返回，因此它固定消费事件、把决策放到异步里做；万一
+ * runJavaScript 迟迟不回来（页面正在销毁、内核异常等），必须有兜底把它按
+ * 「没有网页弹层」处理并继续决策 —— 返回键是主导航手段，不能因为一次异步
+ * 失败就失灵。正常情况下这一步只要几毫秒。
+ */
+const BACK_PROBE_TIMEOUT_MS: number = 500;
 
 @Entry
 @Component
@@ -33,6 +69,13 @@ struct Index {
   @State isLoading: boolean = true;
   @State isError: boolean = false;
   @State isNetworkError: boolean = false;
+  // 当前错误页是否由「加载超时」这一**暂时性**判断触发。
+  //
+  // 必须区分错误成因：超时只是「等太久了」的推测，页面若最终加载成功，错误页就得撤销；
+  // 而 HTTP / 网络错误是确定性失败，必须保留到用户主动重新加载。
+  // 关键在于**两种情况 onPageEnd 都会触发**（服务器返回 500 也算一次加载结束），
+  // 所以不能在 onPageEnd 里无条件清错误态，否则错误页会一闪而过。
+  private errorFromTimeout: boolean = false;
   @StorageLink('deepLinkUrl') @Watch('onDeepLinkChange') deepLinkUrl: string = '';
   // Web 控制器是否已挂载。冷启动期间为 false：此时 loadUrl 会抛异常。
   private controllerReady: boolean = false;
@@ -46,39 +89,33 @@ struct Index {
   delegate: webview.WebDownloadDelegate = new webview.WebDownloadDelegate();
   private pageLoadTimer: number = -1;
   private readonly LOAD_TIMEOUT_MS: number = 15000;
+  // 视口重排通知的防抖定时器：窗口尺寸连续变化（自由多窗拖拽）时只在稳定后通知一次
+  private viewportResizeTimer: number = -1;
+  // 调试用诊断取样定时器（DEBUG_PROBE_INTERVAL_MS > 0 时才启动）
+  private debugProbeTimer: number = -1;
   // 2in1/PC 设备标识：用于返回按钮
   @State isPC: boolean = false;
   // 返回按钮：2in1 设备上访问非 DeepSeek 域名且有回退历史时显示
   @State showBackButton: boolean = false;
   // 上传方式选择模态框
   @State showUploadModal: boolean = false;
-  // 右下角常驻刷新按钮（无状态：始终显示，点击后不隐藏）
+  // 上次「再按一次返回桌面」提示的时间戳（0 表示本次还没提示过）。
+  // 与 EXIT_CONFIRM_WINDOW_MS 配合实现「连按两次才退出」，避免误触直接退出。
+  private lastExitPromptAt: number = 0;
+  // 返回决策是否正在异步进行（查网页弹层）：未完成前的重复按下直接忽略，
+  // 避免一次连击被当成两次动作
+  private backDecisionPending: boolean = false;
   // 键盘避让高度（vp）。键盘是浮层、不改变窗口尺寸，页面底部会落到键盘之下，
-  // 因此需要把右下角按钮抬高到键盘之上，否则会被键盘遮挡。
+  // 悬浮操作条需要按此抬高，否则会被键盘遮挡。
   @State keyboardHeightVp: number = 0;
   // 状态栏避让高度（vp）。底部沉浸开启后布局延伸到系统栏区域，顶部需要按此补 padding，
   // 视觉上仍是一条正常的状态栏，而不是内容压到状态栏文字下面。
   @State statusBarHeightVp: number = 0;
   private avoidAreaHandler: ((data: window.AvoidAreaOptions) => void) | null = null;
-  // 刷新按钮的拖拽位移（相对默认的右下角位置）。长按后可拖到任意位置并停留。
-  @State btnDragX: number = 0;
-  @State btnDragY: number = 0;
-  // 拖拽过程中的视觉反馈
-  @State btnDragging: boolean = false;
-  // 手势开始时的位移基准
-  private btnDragBaseX: number = 0;
-  private btnDragBaseY: number = 0;
-  // 长按进入拖拽模式后，本次抬手不应再触发刷新
-  private btnSuppressClick: boolean = false;
-  // 刷新按钮直径与默认边距（vp），边界限制按这两个值计算
-  private readonly BTN_SIZE: number = 44;
-  private readonly BTN_MARGIN: number = 24;
-  // 页面可用尺寸（vp），由根容器 onAreaChange 提供，用于把按钮限制在屏幕内
+  // 页面可用尺寸（vp），由根容器 onAreaChange 提供，传给悬浮操作条用于边界限制与键盘避让。
+  // 操作条自身的位置状态、拖拽手势与位置持久化都在 components/FloatingBar.ets 内。
   @State pageW: number = 0;
   @State pageH: number = 0;
-  // 首次启动时展示「长按可拖动」提示
-  @State showRefreshHint: boolean = false;
-  private refreshHintTimer: number = -1;
   // 设置面板开关
   @State showSettings: boolean = false;
   // 右下角刷新按钮是否启用（设置面板里的开关，持久化）
@@ -93,7 +130,8 @@ struct Index {
     // 检测是否为 2in1/PC 设备
     this.isPC = deviceInfo.deviceType === '2in1';
     this.setupKeyboardAvoid();
-    this.restoreRefreshButtonPrefs();
+    this.restoreUiPrefs();
+    this.startDebugProbe();
     // 冷启动携带的 DeepLink 直接作为 Web 的初始 src。
     // 不能等到 onPageShow 再 loadUrl —— 那会比 onControllerAttached 早约 35ms，
     // 控制器尚未绑定必然抛异常；即便推迟到 onControllerAttached，
@@ -102,7 +140,7 @@ struct Index {
       this.initialUrl = this.deepLinkUrl;
       hilog.info(DOMAIN, TAG, 'Cold-start DeepLink used as initial src');
       // 已消费，立即清空，避免 onPageShow / onDeepLinkChange 重复处理
-      AppStorage.set<string>('deepLinkUrl', '');
+      AppStorage.setOrCreate<string>('deepLinkUrl', '');
     }
     // 监听网络恢复：处于错误页时自动重连（NetworkKit NetConnection 官方用法）
     try {
@@ -121,11 +159,20 @@ struct Index {
   aboutToDisappear(): void {
     // 组件销毁前清理定时器，避免内存泄漏和无效回调
     this.clearLoadTimeout();
-    // 清理「长按可拖动」提示的定时器
-    if (this.refreshHintTimer !== -1) {
-      clearTimeout(this.refreshHintTimer);
-      this.refreshHintTimer = -1;
+    // 清理视口重排的防抖定时器
+    if (this.viewportResizeTimer !== -1) {
+      clearTimeout(this.viewportResizeTimer);
+      this.viewportResizeTimer = -1;
     }
+    // 清理调试诊断取样定时器
+    if (this.debugProbeTimer !== -1) {
+      clearInterval(this.debugProbeTimer);
+      this.debugProbeTimer = -1;
+    }
+    // 释放挂起的文件选择回调：它是 onShowFileSelector 存下的闭包，持有 Web 侧的
+    // FileSelectorResult。页面销毁后不会再有人调用它，留着会让事件结果与页面对象
+    // 无法回收（用户打开上传框后直接退出页面就会走到这里）。
+    this.pendingFileListHandler = null;
     // 取消避让区监听
     try {
       const handler: ((data: window.AvoidAreaOptions) => void) | null = this.avoidAreaHandler;
@@ -186,19 +233,79 @@ struct Index {
           .mixedMode(MixedMode.None)  // 官方安全默认：禁止加载 HTTP/HTTPS 混合内容
           .imageAccess(true)
           .zoomAccess(true)
+          // ⚠️ 关键：显式开启 meta viewport 解析。
+          //
+          // 内核的默认规则是「UA 不含 Mobile 字段 → 禁用 viewport」。手机默认 UA 含
+          // Mobile 所以一直正常；而平板/2in1 的默认 UA 不含 Mobile，网页里的
+          // width=device-width 就不被解析，布局视口退回约 980px 的默认宽度 ——
+          // 于是窗口拖窄了，网页仍按桌面大屏排版，表现为挤压 / 留白 / 错位。
+          // 显式传 true 可覆盖该禁用状态（SDK 中 metaViewport 的 API Note 明确说明）。
+          //
+          // 注意：2in1 设备无论传 true 还是 false 都**不支持** viewport，
+          // 它走桌面式布局（布局视口跟随窗口），因此对 2in1 不做额外干预。
+          .metaViewport(true)
+          // 软键盘避让：RESIZE_CONTENT = 可视视口与**布局视口**一起收缩，
+          // 网页会因此重排（内容区收缩、输入框留在可视区内），而不是被键盘顶出去。
+          // 这本就是该属性的默认值，显式写出以固定语义、避免默认值变更带来的回退。
+          .keyboardAvoidMode(WebKeyboardAvoidMode.RESIZE_CONTENT)
+          // 键盘收起时让网页输入框**失焦**（焦点回到 body）。
+          //
+          // 默认值是 SILENT —— 键盘隐藏但输入框仍持有焦点。这个「残留焦点」正是
+          // 「点图片莫名弹出键盘」的根源之一：点图片使 Web 组件的焦点/激活状态发生变化，
+          // 内核按自动策略又为那个仍然聚焦的输入框把键盘弹了回来。
+          // 改成 BLUR 后不存在残留焦点，从机制上断掉这条链路。
+          .blurOnKeyboardHideMode(BlurOnKeyboardHideMode.BLUR)
           .darkMode(2)  // WebDarkMode.Auto: 跟随系统深色模式，传递 prefers-color-scheme 给网页
           .backgroundColor($r('app.color.web_background'))
           .width('100%')
           .height('100%')
           .onControllerAttached(() => {
             try {
-              const customUA: string = this.controller.getUserAgent() + ' DeepSeek-HarmonyOS/1.0';
+              // 版本号从应用信息读取，避免与 AppScope/app.json5 的 versionName 脱节。
+              // UA 本身保持内核默认（带有正确的设备身份），只附加产品标识；
+              // 是否附加 Mobile 标记见 common/WebViewport 里 APPEND_MOBILE_UA_TOKEN 的说明。
+              const customUA: string = buildUserAgent(
+                this.controller.getUserAgent(), UA_PRODUCT_PREFIX, this.appVersionName());
               this.controller.setCustomUserAgent(customUA);
             } catch (err) {
               hilog.error(DOMAIN, TAG, 'Failed to set user agent');
             }
             this.setupDownloadDelegate();
+            // 关闭内核的「自动软键盘」策略。
+            //
+            // 默认行为是：Web 组件获得/失去焦点、或激活状态在 inactive/active 之间切换时，
+            // 系统会**自动隐藏或显示**软键盘 —— 这会拿残留的输入框焦点做文章，
+            // 造成「点图片弹出键盘」。改为 DISABLE_AUTO_KEYBOARD_ON_ACTIVE 后，
+            // 键盘只在用户明确点到可输入元素时才出现。
+            // 必须在控制器挂载后调用，否则抛 17100001（未与 Web 组件关联）。
+            // 键盘没弹起来时的临时切换见 ensureSoftKeyboardForEdit。
+            this.setKeyboardAutoMode(false);
             this.controllerReady = true;
+          })
+          // 网页用约定的 console 前缀上报「可编辑元素获得焦点」。
+          //
+          // 为什么需要这条通道：编辑历史消息时，站点是异步渲染编辑框的 —— 程序化 focus
+          // 可能被后到的 DOM 变更顶掉，或者内核因为组件刚好在做激活状态切换而没有拉起键盘，
+          // 表现为「点了输入框但键盘有概率不弹」。网页侧只能知道焦点，键盘只有应用侧知道，
+          // 因此由网页上报焦点、应用侧在键盘确实没起来时兜底。
+          //
+          // 组件侧可用的手段只有 setSoftKeyboardBehaviorMode：IME 的 showSoftKeyboard
+          // 需要系统级权限 ohos.permission.CONNECT_IME_ABILITY，普通应用调用会抛 201。
+          .onConsole((event) => {
+            try {
+              const msg: string = event && event.message ? event.message.getMessage() : '';
+              if (msg.indexOf('__dsFocus:') === 0) {
+                hilog.info(DOMAIN, TAG, 'Edit focus reported: %{public}s', msg);
+                // 主输入框（composer）本身正常，无需兜底
+                if (msg !== '__dsFocus:composer') {
+                  this.ensureSoftKeyboardForEdit();
+                }
+              }
+            } catch (err) {
+              hilog.warn(DOMAIN, TAG, 'onConsole handling failed');
+            }
+            // 不消费，保持页面自身 console 行为不变
+            return false;
           })
           .onPageBegin((event) => {
             this.isLoading = true;
@@ -218,6 +325,15 @@ struct Index {
           })
           .onPageEnd(() => {
             this.isLoading = false;
+            // 只撤销「超时」这一暂时性判断：超时后页面若最终加载成功，错误页必须撤掉，
+            // 否则慢网下用户会看着一个已经加载好的页面被错误页盖住。
+            // 确定性失败（HTTP 4xx/5xx、主框架网络错误）**不能**在这里清 ——
+            // 服务器返回错误同样会触发 onPageEnd，无条件清空会让错误页一闪而过。
+            if (this.errorFromTimeout) {
+              this.errorFromTimeout = false;
+              this.isError = false;
+              this.isNetworkError = false;
+            }
             this.clearLoadTimeout();
             // 控制器就绪前被推迟的 DeepLink 在此补导航。
             // 不能放在 onControllerAttached —— 那里会和组件的初始 src 加载相互覆盖。
@@ -229,16 +345,33 @@ struct Index {
             }
             // 每次页面加载完成后注入剪贴板拦截脚本
             this.injectShareInterceptor();
+            // 修正视口：确保存在 width=device-width 的 viewport 声明，
+            // 并给输入框加高度上限（内容再多也不会无限向上扩张）。
+            // 每个新文档都要重新注入 —— 注入的 style 会随旧文档一起丢弃。
+            this.applyViewportFix();
+            // 装上「点图片不聚焦输入框」的防护，同样是每个新文档都要重新装
+            this.applyWebInputGuard();
+            // 装上「编辑历史消息 + 键盘弹出时隐藏主对话框」的脚本，
+            // 并把当前键盘状态同步过去（可能在键盘已经弹着的时候页面才加载完）
+            this.applyComposerAutoHide();
+            // 打印一次运行时视口诊断，便于实机确认 viewport 是否真的生效
+            this.probeViewport();
             this.updateBackButtonState();
           })
           .onErrorReceive((event) => {
             if (event && event.error && event.error.getErrorCode() !== 0) {
               hilog.warn(DOMAIN, TAG, 'WebView net err: code=%{public}d, info=%{public}s',
                 event.error.getErrorCode(), event.error.getErrorInfo());
-              // 仅主框架的导航错误才触发错误页（过滤子资源错误）
-              if (event.request && event.request.isMainFrame() && !this.checkNetworkAvailable()) {
-                this.isNetworkError = true;
+              // 仅主框架的导航错误才触发错误页（过滤子资源错误）。
+              // 主框架失败一律进错误页：网络可达也可能是服务端不可用、连接被重置或 DNS 异常，
+              // 旧逻辑要求「无网络」才报错，会把这类失败静默吞掉，用户只能干等 15s 超时。
+              // 网络状态只用来决定文案（断网 / 加载失败）。若该次导航随后实际成功，
+              // onPageEnd 会复位错误态，因此不会误报到一个已经加载好的页面上。
+              if (event.request && event.request.isMainFrame()) {
+                this.isNetworkError = !this.checkNetworkAvailable();
                 this.isError = true;
+                // 确定性失败：错误页保留到用户主动重新加载（下次导航的 onPageBegin 会复位）
+                this.errorFromTimeout = false;
                 this.isLoading = false;
                 this.clearLoadTimeout();
               }
@@ -254,6 +387,9 @@ struct Index {
                 // 先检测网络状态，再决定错误类型
                 this.isNetworkError = !this.checkNetworkAvailable();
                 this.isError = true;
+                // 确定性失败：服务器返回 4xx/5xx 同样会触发 onPageEnd，
+                // 因此必须标记为「非超时」，避免 onPageEnd 把错误页清掉
+                this.errorFromTimeout = false;
                 this.isLoading = false;
                 this.clearLoadTimeout();
               } else {
@@ -279,8 +415,8 @@ struct Index {
             // 仅在 chat.deepseek.com 域名下弹出上传模态框
             try {
               const pageUrl: string = this.controller.getUrl();
-              const isChatDeepSeek: boolean = url.URL.parseURL(pageUrl).hostname === DEEPSEEK_HOST;
-              if (!isChatDeepSeek) {
+              // 仅在聊天主站弹出上传方式选择框（精确匹配 host，见 UrlRules.isChatHost）
+              if (!isChatHost(pageUrl)) {
                 event.result.handleFileList([]);
                 return true;
               }
@@ -300,10 +436,10 @@ struct Index {
               return false;
             }
             const requestUrl: string = event.data.getRequestUrl();
-            // share://?url=... 由 JS 注入触发，直接唤起系统分享
-            const shareScheme: string = 'share://?url=';
-            if (requestUrl.startsWith(shareScheme)) {
-              const shareUrl: string = decodeURIComponent(requestUrl.substring(shareScheme.length));
+            // 自定义 scheme 由注入脚本触发，直接唤起系统分享
+            if (requestUrl.startsWith(SHARE_SCHEME_PREFIX)) {
+              const shareUrl: string =
+                decodeURIComponent(requestUrl.substring(SHARE_SCHEME_PREFIX.length));
               this.triggerShare(shareUrl);
               return true;
             }
@@ -319,6 +455,62 @@ struct Index {
             }
             return false;
           })
+          // 网页请求设备权限（麦克风等）。官方规范要求实现该回调：
+          // 不实现时网页侧的请求会被直接拒绝，语音输入等功能静默失效。
+          .onPermissionRequest((event) => {
+            if (event) {
+              this.handleWebPermissionRequest(event.request);
+            }
+          })
+          // SSL 证书错误：一律取消，不提供「继续访问」——本应用无法向用户解释证书风险，
+          // 静默绕过等同于主动把 TLS 降级。handleCancel(true) 会取消该请求并停留在当前页，
+          // 而不是留下白屏。
+          .onSslErrorEventReceive((event) => {
+            if (!event) {
+              return;
+            }
+            hilog.error(DOMAIN, TAG, 'SSL error: %{public}d', event.error);
+            try {
+              event.handler.handleCancel(true);
+            } catch (err) {
+              hilog.warn(DOMAIN, TAG, 'handleCancel failed');
+            }
+            // 首屏加载期间的证书错误意味着主框架拿不到内容，直接进错误页给出明确反馈；
+            // 页面已渲染后的子资源证书错误只取消该请求，不打断用户。
+            if (this.isLoading) {
+              this.isNetworkError = false;
+              this.isError = true;
+              // 证书错误是确定性失败，同样不能被 onPageEnd 清掉
+              this.errorFromTimeout = false;
+              this.isLoading = false;
+              this.clearLoadTimeout();
+            }
+          })
+          // 新窗口请求（window.open / target="_blank"）。
+          // 单 Web 组件架构下不另开窗口，但必须显式调用 setWebController(null) 释放
+          // 被挂起的渲染流程 —— 官方文档明确：不调用该接口会阻塞渲染进程。
+          // 站内地址在当前 Web 内继续导航，站外地址交系统浏览器（复用已有的确认弹窗）。
+          .onWindowNew((event) => {
+            if (!event) {
+              return;
+            }
+            const target: string = event.targetUrl;
+            hilog.info(DOMAIN, TAG, 'New window request: %{public}s', target);
+            try {
+              if (isDeepSeekDomain(target)) {
+                this.controller.loadUrl(target);
+              } else if (event.isUserTrigger) {
+                this.openInSystemBrowser(target);
+              }
+            } catch (err) {
+              hilog.warn(DOMAIN, TAG, 'Failed to handle new window request');
+            }
+            try {
+              event.handler.setWebController(null);
+            } catch (err) {
+              hilog.warn(DOMAIN, TAG, 'setWebController(null) not supported');
+            }
+          })
 
         // 窗口拖动不再由应用自绘手柄承担 —— 窗口已完全交由系统管理（非沉浸式），
         // 系统标题栏即拖动区，且不自绘任何窗口部件。
@@ -330,22 +522,26 @@ struct Index {
         // 2in1 返回按钮：非 DeepSeek 域名且有回退历史时，左上角显示方形返回按钮
         if (this.showBackButton) {
           Button() {
-            Text('←')
+            // 用系统符号替代 '←' 字符：字形字符的字重/基线随字体变化，符号与系统保持一致
+            SymbolGlyph($r('sys.symbol.arrow_left'))
               .fontSize(20)
-              .fontColor($r('app.color.text_primary'))
+              .fontColor([$r('app.color.text_primary')])
           }
-          .width(36)
-          .height(36)
+          // 44×44：满足无障碍最小触摸目标（原 36×36 偏小，单手操作容易点空）
+          .width(44)
+          .height(44)
           .type(ButtonType.Normal)
-          .borderRadius(8)
+          .borderRadius(10)
           .backgroundColor($r('app.color.floating_button_bg'))
-          .position({ x: 36, y: 36 })
+          .position({ x: 32, y: 32 })
           .shadow({
             radius: 8,
             color: $r('app.color.floating_button_shadow'),
             offsetX: 0,
             offsetY: 2
           })
+          // 纯图标按钮必须给出朗读文案，否则读屏只能念出「按钮」
+          .accessibilityText($r('app.string.a11y_back'))
           .onClick(() => {
             try {
               this.controller.backward();
@@ -364,240 +560,42 @@ struct Index {
           })
         }
 
-        // 上传方式选择模态框
+        // 上传方式选择模态框（内容见 components/UploadSheet.ets）
         if (this.showUploadModal) {
-          Column() {
-            Column() {
-              Text($r('app.string.upload_modal_title'))
-                .fontSize(18)
-                .fontWeight(FontWeight.Medium)
-                .fontColor($r('app.color.text_primary'))
-                .margin({ bottom: 20 })
-
-              // 横向排列：拍照 / 相册 / 文件
-              Row() {
-                // 拍照
-                Column() {
-                  SymbolGlyph($r('sys.symbol.camera_fill'))
-                    .fontSize(28)
-                    .margin({ bottom: 8 })
-                  Text($r('app.string.upload_photo'))
-                    .fontSize(13)
-                }
-                .width('30%')
-                .aspectRatio(1)
-                .borderRadius(14)
-                .justifyContent(FlexAlign.Center)
-                .backgroundColor($r('app.color.surface_tile'))
-                .onClick(() => this.handleTakePhoto())
-
-                // 相册
-                Column() {
-                  SymbolGlyph($r('sys.symbol.picture_fill'))
-                    .fontSize(28)
-                    .margin({ bottom: 8 })
-                  Text($r('app.string.upload_album'))
-                    .fontSize(13)
-                }
-                .width('30%')
-                .aspectRatio(1)
-                .borderRadius(14)
-                .justifyContent(FlexAlign.Center)
-                .backgroundColor($r('app.color.surface_tile'))
-                .onClick(() => this.handlePickFromAlbum())
-
-                // 文件
-                Column() {
-                  SymbolGlyph($r('sys.symbol.doc_text_fill'))
-                    .fontSize(28)
-                    .margin({ bottom: 8 })
-                  Text($r('app.string.upload_file'))
-                    .fontSize(13)
-                }
-                .width('30%')
-                .aspectRatio(1)
-                .borderRadius(14)
-                .justifyContent(FlexAlign.Center)
-                .backgroundColor($r('app.color.surface_tile'))
-                .onClick(() => this.handlePickFile())
-              }
-              .width('100%')
-              .justifyContent(FlexAlign.SpaceEvenly)
-            }
-            .width('85%')
-            .constraintSize({ maxWidth: 360 })
-            .padding(24)
-            .borderRadius(16)
-            .backgroundColor($r('app.color.surface_card'))
-            .shadow({ radius: 24, color: $r('app.color.card_shadow'), offsetY: 8 })
-            .onClick(() => {})
-          }
-          .width('100%')
-          .height('100%')
-          .justifyContent(FlexAlign.Center)
-          .backgroundColor($r('app.color.modal_scrim'))
-          .onClick(() => this.dismissUploadModal())
-          .zIndex(100)
-        }
-
-        // 首次启动的「长按可拖动」提示：位于操作条正上方、水平居中对齐，
-        // 6 秒后自动收起，用户长按进入拖拽时也会立即收起。只在首次启动提示一次。
-        if (this.showRefreshHint && this.refreshButtonEnabled) {
-          Text($r('app.string.refresh_drag_hint'))
-            .fontSize(13)
-            .fontColor($r('app.color.text_on_accent'))
-            .backgroundColor($r('app.color.accent'))
-            .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-            .borderRadius(14)
-            .position({ x: '100%', y: '100%' })
-            // 锚点取下边缘中点：这样 translate 给出的就是气泡「底边中心」的位置，
-            // 与操作条的水平中心对齐，气泡整体落在条的上方。
-            .markAnchor({ x: '50%', y: '100%' })
-            .translate({
-              // 水平：与操作条中心对齐（条右边缘在 pageW - BTN_MARGIN + btnDragX，
-              // 再左移半个条宽即为中心）
-              x: -this.BTN_MARGIN + this.btnDragX - this.btnBarWidth() / 2,
-              // 垂直：条顶边再上移 8vp（条的顶边 = 基准位置 - 条高 - 键盘避让抬高）
-              y: -this.BTN_MARGIN + this.btnDragY - this.keyboardLiftVp() - this.BTN_SIZE - 8
-            })
-            .zIndex(102)
-            .onClick(() => this.dismissRefreshHint())
-        }
-
-        // 右下角悬浮操作条：刷新 + 设置合并为一个圆角矩形。
-        // 早先是两个独立圆形按钮，拖动后容易相互重叠；合并成一条后两者的相对位置固定，
-        // 也不会各自与网页右下角的内容争抢空间。长按整条可拖动，松手停留、位置持久化。
-        Row() {
-          // 刷新：一键重新加载网页（可在设置面板中关闭）
-          if (this.refreshButtonEnabled) {
-            Row() {
-              Text('↻')
-                .fontSize(22)
-                .fontColor($r('app.color.text_primary'))
-            }
-            .layoutWeight(1)
-            .height('100%')
-            .justifyContent(FlexAlign.Center)
-            .onClick(() => {
-              if (this.btnSuppressClick) {
-                // 本次是长按拖拽的抬手，不当作刷新
-                this.btnSuppressClick = false;
-                return;
-              }
-              // 刷新会丢弃未提交的输入，先征求确认；
-              // 用户勾选过「不再显示」则直接刷新，不再打扰。
-              if (this.refreshSkipConfirm) {
-                this.doRefresh();
-              } else {
-                this.noMoreRefreshPrompt = false;
-                this.showRefreshConfirm();
-              }
-            })
-
-            Divider()
-              .vertical(true)
-              .height(20)
-              .color($r('app.color.drag_indicator'))
-          }
-
-          // 设置：采用官方符号 gearshape（系统资源码位 0xF0020，线性齿轮）
-          Row() {
-            SymbolGlyph($r('sys.symbol.gearshape'))
-              .fontSize(20)
-              .fontColor([$r('app.color.text_primary')])
-          }
-          .layoutWeight(1)
-          .height('100%')
-          .justifyContent(FlexAlign.Center)
-          .onClick(() => {
-            this.showSettings = true;
+          UploadSheet({
+            onTakePhoto: () => this.handleTakePhoto(),
+            onPickFromAlbum: () => this.handlePickFromAlbum(),
+            onPickFile: () => this.handlePickFile(),
+            onDismiss: () => this.dismissUploadModal()
           })
         }
-        .width(this.btnBarWidth())
-        .height(this.BTN_SIZE)
-        .borderRadius(this.BTN_SIZE / 2)
-        // 长按进入拖动态时给出高亮：底色提亮 + 阴影加深 + 整体放大
-        .backgroundColor(this.btnDragging
-          ? $r('app.color.floating_button_bg_active')
-          : $r('app.color.floating_button_bg'))
-        .shadow({
-          radius: this.btnDragging ? 20 : 12,
-          color: $r('app.color.floating_button_shadow'),
-          offsetY: this.btnDragging ? 8 : 4
-        })
-        .scale({ x: this.btnDragging ? 1.12 : 1, y: this.btnDragging ? 1.12 : 1 })
-        // animation 作用于「它之前声明的所有属性」，因此上面这些视觉属性会平滑过渡。
-        // 务必把 .translate 放在它之后 —— 位置不参与动画，拖动才能完全跟手；
-        // 若把 translate 写在 animation 之前，位移会被套上缓动，手感发飘、迟滞。
-        .animation({ duration: 150, curve: Curve.FastOutSlowIn })
-        .position({ x: '100%', y: '100%' })
-        .markAnchor({ x: '100%', y: '100%' })
-        .translate({
-          // 基础位置：距右下角 BTN_MARGIN；再加上用户拖拽的位移；
-          // 键盘确实遮挡时才按需抬高（不遮挡则完全不移动）。
-          // 位于 .animation 之后 → 不参与动画 → 跟手无延迟。
-          x: -this.BTN_MARGIN + this.btnDragX,
-          y: -this.BTN_MARGIN + this.btnDragY - this.keyboardLiftVp()
-        })
-        // 每次新的触摸都重置「本次不刷新」标记
-        .onTouch((event: TouchEvent) => {
-          if (event.type === TouchType.Down) {
-            this.btnSuppressClick = false;
+
+        // 右下角悬浮操作条（刷新 + 设置）。位置状态、拖拽手势、边界限制与位置持久化
+        // 全部收在 components/FloatingBar.ets 内；页面只决定「刷新要不要弹确认框」，
+        // 并把页面可用尺寸与键盘高度传下去供其计算边界与避让。
+        FloatingBar({
+          pageW: this.pageW,
+          pageH: this.pageH,
+          keyboardHeightVp: this.keyboardHeightVp,
+          refreshEnabled: this.refreshButtonEnabled,
+          onRefresh: () => this.onFloatingRefresh(),
+          onOpenSettings: () => {
+            this.showSettings = true;
           }
         })
-        // 长按后拖动：官方手势组合。用「长按 → 拖动」序列把拖拽与单击区分开，
-        // 避免普通点击被误判为拖动。
-        .gesture(
-          GestureGroup(GestureMode.Sequence,
-            LongPressGesture({ repeat: false, duration: 400 })
-              .onAction(() => {
-                // 先把当前的键盘避让量固化进 btnDragY（此刻 btnDragging 仍为 false，
-                // keyboardLiftVp 还能算出真实值），使按钮在进入拖动瞬间保持原位、不跳动；
-                // 随后 btnDragging 置 true，拖动全程不再参与避让，完全跟手。
-                this.btnDragY = this.btnDragY - this.keyboardLiftVp();
-                // 进入拖拽模式：给出视觉反馈，抑制随后的点击，并收起首次提示
-                this.btnDragging = true;
-                this.btnSuppressClick = true;
-                this.dismissRefreshHint();
-              })
-              .onActionEnd(() => {
-                this.btnDragging = false;
-              })
-              .onActionCancel(() => {
-                this.btnDragging = false;
-              }),
-            PanGesture({ fingers: 1, direction: PanDirection.All, distance: 1 })
-              .onActionStart(() => {
-                this.btnDragBaseX = this.btnDragX;
-                this.btnDragBaseY = this.btnDragY;
-              })
-              .onActionUpdate((event: GestureEvent) => {
-                this.btnDragX = this.btnDragBaseX + event.offsetX;
-                this.btnDragY = this.btnDragBaseY + event.offsetY;
-                // 拖动过程中就做边界限制，使按钮到窗口边缘即停住，
-                // 而不是拖出去、松手才弹回来
-                this.clampBtnOffset();
-              })
-              .onActionEnd(() => {
-                this.btnDragging = false;
-                // 限制在屏幕内，并记住位置
-                this.clampBtnOffset();
-                this.saveButtonOffset();
-                hilog.info(DOMAIN, TAG, 'Floating bar moved to (%{public}d, %{public}d)',
-                  this.btnDragX, this.btnDragY);
-              })
-          )
-        )
-        .zIndex(101)
       }
       .width('100%')
       .layoutWeight(1)
-      // 记录刷新按钮实际可用的坐标空间（Stack 才是按钮 100% 定位的参照），
-      // 用于把按钮限制在窗口内；非全屏（悬浮窗/自由多窗）时这里就是应用窗口的尺寸。
+      // 把实际可用的坐标空间交给悬浮操作条：它才是靠 100% 定位的一方，
+      // 需要用这两个值把按钮限制在窗口内并计算键盘避让。
+      // 非全屏（悬浮窗/自由多窗）时这里就是应用窗口的尺寸。
       .onAreaChange((_oldValue: Area, newValue: Area) => {
         this.pageW = newValue.width as number;
         this.pageH = newValue.height as number;
-        this.clampBtnOffset();
+        // 窗口尺寸变化后通知网页重排。
+        // 自由多窗拖拽时这里会高频触发，因此内部做了防抖（见 scheduleViewportResize）：
+        // 只在尺寸稳定下来之后才通知一次，绝不重载页面，避免闪烁与丢失输入。
+        this.scheduleViewportResize();
       })
     }
     .width('100%')
@@ -629,14 +627,20 @@ struct Index {
   private onErrorRetry(): void {
     this.isError = false;
     this.isNetworkError = false;
+    this.errorFromTimeout = false;
     this.refreshPage();
   }
 
   onPageShow(): void {
     if (this.deepLinkUrl && this.deepLinkUrl !== '') {
       this.navigateToUrl(this.deepLinkUrl);
-      AppStorage.set<string>('deepLinkUrl', '');
+      AppStorage.setOrCreate<string>('deepLinkUrl', '');
     }
+    // 回到前台时补打一次视口诊断。
+    // 除了 onPageEnd，这里也给了一个**可主动触发**的取样点：把应用切到后台再切回来
+    // 就会重新取样，因此在真机上「输入一段长文本 → 切后台再切回 → 看日志」
+    // 就能拿到输入框此时的实际高度与样式，不必接调试器。
+    this.probeViewport();
   }
 
   // 响应热启动时 onNewWant 设置的 deepLinkUrl 变化（onPageShow 仅在冷/温启动触发）
@@ -644,27 +648,319 @@ struct Index {
     if (this.deepLinkUrl && this.deepLinkUrl !== '') {
       hilog.info(DOMAIN, TAG, 'DeepLink change detected: %{private}s', this.deepLinkUrl);
       this.navigateToUrl(this.deepLinkUrl);
-      AppStorage.set<string>('deepLinkUrl', '');
+      AppStorage.setOrCreate<string>('deepLinkUrl', '');
     }
   }
 
+  /**
+   * 系统返回（侧滑返回手势 / 返回键）。
+   *
+   * 策略与判定规则见 common/BackPolicy.ets（纯函数，有单测）：
+   *   · **网页自己的弹层**（设置弹窗等）——交给网页后退去关掉它；
+   *   · **对话界面**（聊天主站根级页面：首页、会话页）——**不执行网页后退**，
+   *     改为「再按一次返回桌面」：第一次只弹提示，在确认窗口内再按一次才退出；
+   *   · **二三级界面**（`/sign_in`、`/share/…` 等站内其他页面）——**保持原样**，
+   *     网页还有历史就照旧后退；
+   *   · 网页退无可退时也给一次确认，避免一次误触直接退出。
+   *
+   * 为什么这里要**异步**：判断「网页弹层是否开着」必须查 DOM（runJavaScript 只有
+   * 异步形式），而 onBackPress 必须同步返回。因此这里**固定消费掉事件**，
+   * 由 {@link dispatchBackDecision} 在几十毫秒内完成决策并执行对应动作；
+   * 代价是「退出到桌面」不能靠 `return false`，必须自己调 terminateSelf()。
+   */
   onBackPress(): boolean {
-    // 上传模态框打开时，优先关闭模态框，避免返回手势直接退出应用
-    if (this.showUploadModal) {
-      this.dismissUploadModal();
-      return true;
+    // 全部交给异步决策（见 dispatchBackDecision）：应用自己的弹层同样由
+    // BackPolicy 的 dismiss-modal 分支处理，保证判定只有一处实现。
+    this.dispatchBackDecision();
+    return true;
+  }
+
+  /**
+   * 异步决策并执行返回动作。
+   *
+   * 先查网页的瞬时界面（runJavaScript），再按 BackPolicy 决定：
+   * web-back → 网页后退；dismiss-overlay → 点掉网页菜单/多选模式；
+   * prompt-exit → 提示并消费；exit-now → 退出到桌面。
+   *
+   * 两个健壮性措施：
+   *   · **兜底超时**：DOM 查询若迟迟不回来（异常、页面已销毁等），按「没有瞬时界面」
+   *     继续走决策 —— 返回键是主导航手段，绝不能因为一次异步失败而失灵；
+   *   · **去重**：一次决策未完成前的重复按下直接忽略，避免连击触发两次动作。
+   */
+  private dispatchBackDecision(): void {
+    if (this.backDecisionPending) {
+      return;
     }
+    this.backDecisionPending = true;
+    let settled: boolean = false;
+    const settle = (overlayKind: string, overlayDetail: string): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      this.backDecisionPending = false;
+      this.applyBackDecision(overlayKind, overlayDetail);
+    };
+    const settleRaw = (raw: string): void => {
+      settle(parseOverlayKind(raw), parseOverlayKind(raw, false));
+    };
+
+    // 兜底：超时按「网页没有瞬时界面」处理
+    setTimeout(() => settle(parseOverlayKind(''), parseOverlayKind('', false)), BACK_PROBE_TIMEOUT_MS);
     try {
-      if (this.controller.accessBackward()) {
+      this.controller.runJavaScript(buildOverlayProbeScript())
+        .then((raw: string) => settleRaw(raw))
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'overlay probe failed: %{public}d', err.code);
+          settleRaw('');
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to run overlay probe');
+      settleRaw('');
+    }
+  }
+
+  /** 按 BackPolicy 的决策执行动作 */
+  private applyBackDecision(webOverlay: string, overlayDetail: string): void {
+    let canGoBack: boolean = false;
+    let currentUrl: string = '';
+    try {
+      canGoBack = this.controllerReady ? this.controller.accessBackward() : false;
+      currentUrl = this.controllerReady ? this.controller.getUrl() : '';
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'Failed to read web back state');
+    }
+
+    const context: BackContext = {
+      modalOpen: this.showUploadModal || this.showSettings,
+      webOverlay: webOverlay,
+      onChatRoot: isChatRootPage(currentUrl),
+      canGoBack: canGoBack,
+      msSinceExitPrompt: this.lastExitPromptAt > 0 ? (Date.now() - this.lastExitPromptAt) : -1
+    };
+    const action: string = decideBackAction(context);
+    hilog.info(DOMAIN, TAG,
+      'Back action: %{public}s (overlay=%{public}s canGoBack=%{public}s onChatRoot=%{public}s detail=%{public}s)',
+      action, webOverlay === '' ? 'none' : webOverlay,
+      String(canGoBack), String(context.onChatRoot), overlayDetail);
+
+    // 应用自己的弹层（上传方式选择 / 设置面板）：关掉它，不再往下走
+    if (action === BACK_ACTION_DISMISS_MODAL) {
+      if (this.showUploadModal) {
+        this.dismissUploadModal();
+      } else {
+        this.showSettings = false;
+      }
+      return;
+    }
+
+    // 网页自己的瞬时界面（菜单 / 侧栏多选模式 / 无历史的弹窗）：点掉它。
+    // 有历史的弹窗（系统设置）不走这里 —— 见 BackPolicy 中的说明。
+    if (action === BACK_ACTION_DISMISS_OVERLAY) {
+      this.dismissWebOverlay();
+      return;
+    }
+
+    if (action === BACK_ACTION_WEB_BACK) {
+      try {
         this.controller.backward();
         this.updateBackButtonState();
-        return true;
+      } catch (err) {
+        hilog.error(DOMAIN, TAG, 'backward failed');
       }
-    } catch (err) {
-      hilog.error(DOMAIN, TAG, 'onBackPress failed');
+      return;
     }
+
+    if (action === BACK_ACTION_PROMPT_EXIT) {
+      this.lastExitPromptAt = Date.now();
+      this.showBackAgainToast();
+      return;
+    }
+
+    // exit-now：事件已被消费，必须自己退出（等价于旧实现的 return false）
+    this.lastExitPromptAt = 0;
     this.showBackButton = false;
-    return false;
+    this.exitToDesktop();
+  }
+
+  /**
+   * 点掉网页自己的瞬时界面（菜单 / 侧栏多选模式），并回读执行结果便于诊断。
+   *
+   * 走到这里的只有「不靠历史关闭」的界面：菜单、多选模式，以及没有历史的弹窗。
+   * 有历史的弹窗（如系统设置）由 BackPolicy 直接判为网页后退 —— 它没有可点的
+   * 关闭入口、又盖满屏幕点不到外面，DOM 点不掉，后退才是它自己的关闭动作。
+   */
+  private dismissWebOverlay(): void {
+    try {
+      this.controller.runJavaScript(buildOverlayDismissScript())
+        .then((result: string) => {
+          hilog.info(DOMAIN, TAG, 'Web overlay dismissed: %{public}s', result);
+          // 用 isDismissClicked 解析：runJavaScript 的字符串返回值带引号，
+          // 直接拿原文判断会把「点到了」误判成「没点到」
+          if (!isDismissClicked(result)) {
+            hilog.warn(DOMAIN, TAG, 'No dismiss target found for the web overlay');
+          }
+        })
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'overlay dismiss failed: %{public}d', err.code);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to dismiss web overlay');
+    }
+  }
+
+  /** 退出到桌面。事件已被 onBackPress 消费，所以只能主动结束本 Ability */
+  private exitToDesktop(): void {
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      ctx.terminateSelf().catch((err: BusinessError) => {
+        hilog.error(DOMAIN, TAG, 'terminateSelf failed: %{public}s', err.message);
+      });
+      hilog.info(DOMAIN, TAG, 'Exit to desktop by double back press');
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'Failed to terminate self');
+    }
+  }
+
+  /**
+   * 装上「编辑历史消息 + 键盘弹出时隐藏主对话框」的脚本，并同步一次键盘状态。
+   *
+   * 为什么键盘状态要由应用侧推：网页侧只能靠「可视高度变小」推断，而自由多窗 /
+   * 悬浮窗拖拽同样会让可视高度变小，两者分不开；ArkUI 侧有权威信号
+   * （avoidAreaChange 的 TYPE_KEYBOARD 底部避让高度）。
+   */
+  private applyComposerAutoHide(): void {
+    try {
+      this.controller.runJavaScript(buildComposerAutoHideScript())
+        .then((result: string) => {
+          hilog.info(DOMAIN, TAG, 'Composer auto-hide: %{public}s', result);
+          this.syncKeyboardStateToWeb(this.keyboardHeightVp > 0);
+        })
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'composer auto-hide failed: %{public}d', err.code);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to install composer auto-hide');
+    }
+  }
+
+  /** 把键盘弹起/收起状态推给网页（网页据此决定要不要隐藏主对话框） */
+  private syncKeyboardStateToWeb(keyboardUp: boolean): void {
+    try {
+      this.controller.runJavaScript(buildKeyboardStateScript(keyboardUp))
+        .then((result: string) => {
+          hilog.info(DOMAIN, TAG, 'Keyboard state -> web: %{public}s', result);
+        })
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'keyboard state sync failed: %{public}d', err.code);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to sync keyboard state');
+    }
+  }
+
+  /**
+   * 兜底拉起软键盘（仅在「内联编辑态聚焦了编辑框、但键盘确实没弹起来」时触发）。
+   *
+   * 两级手段，先轻后重：
+   *   1. `inputMethod.getController().showTextInput(RequestKeyboardReason.TOUCH)`
+   *      —— 直接请输入法「显示文本输入」。它是**不需要系统权限**的
+   *      （`showSoftKeyboard()` 需要 `ohos.permission.CONNECT_IME_ABILITY`，
+   *      普通应用调用会抛 201，因此不能用）；当前没有绑定编辑框时会抛 12800003。
+   *   2. 临时把键盘策略切回 DEFAULT + 让网页重新 focus 一次当前编辑元素 ——
+   *      DISABLE_AUTO_KEYBOARD_ON_ACTIVE 保证的是「组件激活状态切换时不自动弹键盘」，
+   *      本身不阻止焦点驱动那一路；编辑态下组件激活与页面聚焦常常同时发生，
+   *      切回 DEFAULT 能让内核的焦点驱动路径生效。
+   *
+   * 之后无论成败都恢复 DISABLE_AUTO_KEYBOARD_ON_ACTIVE —— 那是「点图片不弹键盘」的
+   * 防线之一，不能长期关掉。
+   */
+  private ensureSoftKeyboardForEdit(): void {
+    // 给内核一点时间：正常路径下 focus 之后键盘会自己起来，不要抢
+    setTimeout(() => {
+      if (this.keyboardHeightVp > 0) {
+        hilog.info(DOMAIN, TAG, 'Soft keyboard already shown, no fallback needed');
+        return;
+      }
+      hilog.info(DOMAIN, TAG, 'Soft keyboard missing for inline edit, applying fallback');
+      this.requestImeTextInput();
+      // 第一级若没生效，再走「切模式 + 重新聚焦」
+      setTimeout(() => {
+        if (this.keyboardHeightVp > 0) {
+          hilog.info(DOMAIN, TAG, 'Keyboard shown by showTextInput');
+          return;
+        }
+        hilog.info(DOMAIN, TAG, 'showTextInput ineffective, switching mode and refocusing');
+        this.setKeyboardAutoMode(true);
+        try {
+          this.controller.runJavaScript(buildRetryFocusScript())
+            .then((result: string) => {
+              hilog.info(DOMAIN, TAG, 'Retry edit focus: %{public}s', result);
+            })
+            .catch((err: BusinessError) => {
+              hilog.warn(DOMAIN, TAG, 'retry focus failed: %{public}d', err.code);
+            });
+        } catch (err) {
+          hilog.warn(DOMAIN, TAG, 'Failed to retry edit focus');
+        }
+        // 恢复防线：无论这次有没有成功，都不能把「点图片不弹键盘」的保护一直关着
+        setTimeout(() => {
+          this.setKeyboardAutoMode(false);
+          hilog.info(DOMAIN, TAG, 'Keyboard fallback done, keyboardHeightVp=%{public}d',
+            this.keyboardHeightVp);
+        }, 900);
+      }, 260);
+    }, 350);
+  }
+
+  /**
+   * 请输入法显示文本输入。
+   *
+   * `showTextInput` 不需要系统权限（`showSoftKeyboard` 需要 CONNECT_IME_ABILITY），
+   * 是本应用唯一能直接拉起键盘的官方接口；没有绑定编辑框时会抛 12800003，走下一级兜底。
+   */
+  private requestImeTextInput(): void {
+    try {
+      inputMethod.getController()
+        .showTextInput(inputMethod.RequestKeyboardReason.TOUCH)
+        .then(() => {
+          hilog.info(DOMAIN, TAG, 'showTextInput requested');
+        })
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'showTextInput failed: code=%{public}d, msg=%{public}s',
+            err.code, err.message);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'inputMethod controller unavailable');
+    }
+  }
+
+  /**
+   * 切换内核的软键盘自动策略。
+   *
+   * @param allowAuto true = DEFAULT（组件激活状态变化时系统可自动显示/隐藏键盘），
+   *                  false = DISABLE_AUTO_KEYBOARD_ON_ACTIVE（默认防线）
+   */
+  private setKeyboardAutoMode(allowAuto: boolean): void {
+    try {
+      this.controller.setSoftKeyboardBehaviorMode(allowAuto
+        ? webview.WebSoftKeyboardBehaviorMode.DEFAULT
+        : webview.WebSoftKeyboardBehaviorMode.DISABLE_AUTO_KEYBOARD_ON_ACTIVE);
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'setSoftKeyboardBehaviorMode failed');
+    }
+  }
+
+  /** 提示「再按一次返回桌面」。时长与确认窗口一致，提示消失即窗口结束 */
+  private showBackAgainToast(): void {
+    try {
+      this.getUIContext().getPromptAction().showToast({
+        message: $r('app.string.toast_back_again_to_exit'),
+        duration: EXIT_CONFIRM_WINDOW_MS
+      });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to show back-again toast');
+    }
   }
 
   private startLoadTimeout(): void {
@@ -675,6 +971,8 @@ struct Index {
       // 超时时检测网络：无网络则为网络错误，有网络则为加载失败
       this.isNetworkError = !this.checkNetworkAvailable();
       this.isError = true;
+      // 标记为「暂时性」判断：页面若在此之后加载完成，onPageEnd 会把错误页撤销
+      this.errorFromTimeout = true;
     }, this.LOAD_TIMEOUT_MS);
   }
 
@@ -712,6 +1010,140 @@ struct Index {
     }
   }
 
+  /**
+   * 修正网页视口：保证存在 `width=device-width` 的 viewport 声明，
+   * 并给输入框加高度上限，避免长文本时输入框无限向上扩张。
+   * 脚本内容见 common/WebViewport.buildViewportFixScript。
+   */
+  private applyViewportFix(): void {
+    try {
+      // 把「应用窗口宽度」传进脚本：布局视口必须等于窗口宽度。
+      // 不能依赖网页自带的 width=device-width —— 那是**屏幕**宽度，
+      // 在自由多窗/悬浮窗下窗口远窄于屏幕，页面会按整屏排版再整体缩小（UI 看起来变小）。
+      // 回读执行结果：注入失败（比如 head 尚未就绪）时必须能看见，
+      // 否则「样式没生效」在应用侧完全无声，只能靠猜。
+      this.controller.runJavaScript(buildViewportFixScript(this.pageW))
+        .then((result: string) => {
+          hilog.info(DOMAIN, TAG, 'Viewport fix: %{public}s', result);
+        })
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'viewport fix failed: %{public}d', err.code);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to apply viewport fix');
+    }
+  }
+
+  /**
+   * 窗口尺寸变化后通知网页重排（已完成防抖）。
+   *
+   * 自由多窗拖拽时 onAreaChange 会高频触发，这里只保留「最后一次」，
+   * 窗口稳定后才通知一次。**不重载页面** —— 重载会闪烁且丢掉正在输入的内容。
+   */
+  private scheduleViewportResize(): void {
+    if (this.viewportResizeTimer !== -1) {
+      clearTimeout(this.viewportResizeTimer);
+    }
+    this.viewportResizeTimer = setTimeout(() => {
+      this.viewportResizeTimer = -1;
+      this.notifyViewportResize();
+    }, VIEWPORT_RESIZE_DEBOUNCE_MS);
+  }
+
+  /** 补发一次 resize 事件，唤醒「只在加载时读一次宽度」的 SPA */
+  private notifyViewportResize(): void {
+    // 窗口宽度变了 → 布局视口宽度也必须跟着变，否则页面仍按旧宽度排版
+    //（自由多窗拖拽时宽度连续变化，这里已经过防抖）
+    this.applyViewportFix();
+    try {
+      this.controller.runJavaScript(buildResizeNotifyScript())
+        .then((result: string) => {
+          hilog.info(DOMAIN, TAG, 'Viewport resize notified: %{public}s', result);
+        })
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'resize notify failed: %{public}d', err.code);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to notify viewport resize');
+    }
+  }
+
+  /**
+   * 打印一次运行时视口诊断。
+   *
+   * 为什么需要它：本应用无法在设备上调试，而「viewport 到底有没有生效」只能看运行时的
+   * 真实数值。关键看 **clientW 是否随窗口宽度变化**：
+   *   · clientW 跟随窗口宽度  → viewport 已生效，方案奏效；
+   *   · clientW 固定在 ~980   → 说明 metaViewport(true) 的覆盖没生效，
+   *     此时把 common/WebViewport 的 APPEND_MOBILE_UA_TOKEN 改为 true 兜底。
+   * 顺带打印输入框的实际高度，用于判断高度上限是否命中。
+   */
+  private probeViewport(): void {
+    // 顺带打印「网页能否后退 / 是否对话界面」：返回手势策略依赖这两个值
+    try {
+      if (this.controllerReady) {
+        hilog.info(DOMAIN, TAG, 'Web back state canGoBack=%{public}s onChatRoot=%{public}s',
+          String(this.controller.accessBackward()),
+          String(isChatRootPage(this.controller.getUrl())));
+      }
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to read web back state in probe');
+    }
+    try {
+      this.controller.runJavaScript(buildProbeScript())
+        .then((result: string) => {
+          hilog.info(DOMAIN, TAG, 'Viewport probe: %{public}s', result);
+        })
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'viewport probe failed: %{public}d', err.code);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to run viewport probe');
+    }
+  }
+
+  /**
+   * 装上「点图片不聚焦输入框」的防护脚本。
+   *
+   * 与内核侧的两个开关配合，覆盖它们管不到的那条路径：
+   *   · .blurOnKeyboardHideMode(BLUR) + setSoftKeyboardBehaviorMode(...)
+   *     —— 消除内核基于残留焦点的自动弹键盘；
+   *   · 本脚本 —— 应对网页自己把焦点移回输入框（例如把「点击输入区即聚焦」
+   *     的处理器挂在了包含图片预览的容器上，点图片冒泡上去就聚焦了）。
+   *
+   * 脚本的防误伤设计见 common/WebInputGuard 的模块注释。
+   */
+  private applyWebInputGuard(): void {
+    if (!ENABLE_IMAGE_TAP_FOCUS_GUARD) {
+      return;
+    }
+    try {
+      this.controller.runJavaScript(buildFocusGuardScript())
+        .then((result: string) => {
+          hilog.info(DOMAIN, TAG, 'Focus guard: %{public}s', result);
+        })
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'focus guard failed: %{public}d', err.code);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to install focus guard');
+    }
+  }
+
+  /**
+   * 启动调试用的诊断取样定时器（仅在 DEBUG_PROBE_INTERVAL_MS > 0 时生效）。
+   * 便于在「键盘开着、输入框里有长文本」的任意时刻抓取一次运行时快照。
+   */
+  private startDebugProbe(): void {
+    if (DEBUG_PROBE_INTERVAL_MS <= 0) {
+      return;
+    }
+    this.debugProbeTimer = setInterval(() => {
+      this.probeViewport();
+    }, DEBUG_PROBE_INTERVAL_MS);
+    hilog.info(DOMAIN, TAG, 'Debug probe interval started: %{public}d ms', DEBUG_PROBE_INTERVAL_MS);
+  }
+
   // 注入 JS 覆写 navigator.clipboard.writeText：拦截 DeepSeek 分享链接转为系统分享
   private injectShareInterceptor(): void {
     try {
@@ -724,7 +1156,7 @@ struct Index {
             var _orig = navigator.clipboard.writeText.bind(navigator.clipboard);
             navigator.clipboard.writeText = function(text) {
               if (typeof text === 'string' && text.indexOf(PREFIX) === 0) {
-                window.location.href = 'share://?url=' + encodeURIComponent(text);
+                window.location.href = '${SHARE_SCHEME_PREFIX}' + encodeURIComponent(text);
                 return Promise.resolve();
               }
               return _orig(text);
@@ -734,6 +1166,16 @@ struct Index {
       `);
     } catch (err) {
       // JS 注入可能在受限页面失败，静默忽略
+    }
+  }
+
+  /** 读取应用版本名（供 User-Agent 使用）；读取失败返回空串，不影响网页加载 */
+  private appVersionName(): string {
+    try {
+      return bundleManager.getBundleInfoForSelfSync(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT).versionName;
+    } catch (err) {
+      return '';
     }
   }
 
@@ -863,8 +1305,8 @@ struct Index {
         this.showBackButton = false;
         return;
       }
-      const isChatDeepSeek: boolean = url.URL.parseURL(pageUrl).hostname === DEEPSEEK_HOST;
-      this.showBackButton = !isChatDeepSeek;
+      // 只有离开聊天主站后才提供返回入口（精确匹配 host，见 UrlRules.isChatHost）
+      this.showBackButton = !isChatHost(pageUrl);
     } catch (err) {
       this.showBackButton = false;
     }
@@ -942,6 +1384,78 @@ struct Index {
     }
   }
 
+  /**
+   * 处理网页的权限请求。
+   *
+   * 官方链路分两步，缺一不可：
+   *   1. 网页 → 应用：在 onPermissionRequest 里决定 grant / deny；
+   *   2. 应用 → 系统：应用自身必须已持有对应系统权限（user_grant 需运行时申请）。
+   * 只做第 1 步时网页会以为已授权、实际采不到数据，语音输入表现为「按了没反应」。
+   *
+   * 放行范围严格与 module.json5 的声明保持一致：目前只放行语音输入所需的麦克风，
+   * 其余资源（摄像头 / 传感器 / MIDI）一律拒绝，不申请用不到的敏感权限。
+   */
+  private async handleWebPermissionRequest(request: PermissionRequest): Promise<void> {
+    let resources: Array<string> = [];
+    try {
+      resources = request.getAccessibleResource();
+      hilog.info(DOMAIN, TAG, 'Web permission request from %{public}s: %{public}s',
+        request.getOrigin(), resources.join(','));
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to read permission request');
+      request.deny();
+      return;
+    }
+
+    if (!resources.includes(ProtectedResourceType.AUDIO_CAPTURE)) {
+      hilog.info(DOMAIN, TAG, 'Deny resource that the app has not declared');
+      request.deny();
+      return;
+    }
+
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const granted: boolean = await ensurePermission(context, MICROPHONE_PERMISSION);
+      if (!granted) {
+        // 系统权限没拿到就没必要再打扰用户，直接拒绝（网页会收到 denied）
+        request.deny();
+        return;
+      }
+      this.confirmWebMicrophone(request, resources);
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Permission flow failed');
+      request.deny();
+    }
+  }
+
+  /** 系统权限就绪后，再向用户确认是否允许**当前网页**使用麦克风 */
+  private confirmWebMicrophone(request: PermissionRequest, resources: Array<string>): void {
+    try {
+      this.getUIContext().getPromptAction().showDialog({
+        title: $r('app.string.permission_request_title'),
+        message: $r('app.string.permission_request_mic'),
+        buttons: [
+          { text: $r('app.string.common_deny'), color: $r('app.color.text_button_secondary') },
+          { text: $r('app.string.common_agree'), color: $r('app.color.accent') }
+        ]
+      }).then((result: promptAction.ShowDialogSuccessResponse) => {
+        // 按钮顺序为 [拒绝, 同意]，index 1 才是同意
+        if (result.index === 1) {
+          request.grant(resources);
+        } else {
+          request.deny();
+        }
+      }).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'Permission dialog failed: %{public}d', err.code);
+        // 弹窗失败时保守拒绝：绝不能在用户无感知的情况下放行麦克风
+        request.deny();
+      });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to show permission dialog');
+      request.deny();
+    }
+  }
+
   // 导航到指定 URL（用于 DeepLink 跳转）
   private navigateToUrl(url: string): void {
     // 冷启动时 onPageShow 早于 Web 的 onControllerAttached（真机实测相差约 35ms），
@@ -990,8 +1504,10 @@ struct Index {
       if (vp !== this.keyboardHeightVp) {
         this.keyboardHeightVp = vp;
         hilog.info(DOMAIN, TAG, 'Keyboard avoid height: %{public}d px -> %{public}d vp', px, vp);
-        // 键盘高度变化会改变按钮的可用范围，重新做一次边界限制
-        this.clampBtnOffset();
+        // 键盘高度变化会改变悬浮操作条的可用范围，
+        // 由 FloatingBar 的 @Watch 自行重算边界与避让量，页面无需再手动介入。
+        // 同时把「键盘是否弹起」推给网页：编辑历史消息时据此隐藏主对话框。
+        this.syncKeyboardStateToWeb(vp > 0);
       }
     };
     try {
@@ -1016,99 +1532,32 @@ struct Index {
   }
 
   /**
-   * 恢复刷新按钮上次被拖到的位置；若是首次启动，展示一次「长按可拖动」提示。
-   * 存储读写失败都不影响使用，只是回到默认位置 / 不再提示。
+   * 恢复页面侧持有的界面偏好：刷新按钮开关、「不再显示刷新确认」。
+   * 悬浮操作条的拖拽位置与「长按可拖动」提示归 FloatingBar 自己管。
+   * 存储读取失败都不影响使用，只是回到默认值。
    */
-  private restoreRefreshButtonPrefs(): void {
+  private restoreUiPrefs(): void {
     try {
       const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      const offset: number[] = loadRefreshButtonOffset(ctx);
-      if (offset.length === 2) {
-        this.btnDragX = offset[0];
-        this.btnDragY = offset[1];
-      }
       this.refreshButtonEnabled = isRefreshButtonEnabled(ctx);
       this.refreshSkipConfirm = isRefreshConfirmSkipped(ctx);
-      if (!isRefreshHintShown(ctx)) {
-        this.showRefreshHint = true;
-        markRefreshHintShown(ctx);
-        hilog.info(DOMAIN, TAG, 'Showing long-press hint for the first launch');
-        // 6 秒后自动收起
-        this.refreshHintTimer = setTimeout(() => {
-          this.showRefreshHint = false;
-          this.refreshHintTimer = -1;
-        }, 6000);
-      }
     } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'Failed to restore refresh button prefs');
+      hilog.warn(DOMAIN, TAG, 'Failed to restore UI prefs');
     }
   }
 
   /**
-   * 键盘实际遮挡刷新按钮时所需的抬高量（vp）；不遮挡返回 0，即完全不移动。
+   * 悬浮操作条点「刷新」后的业务决策。
    *
-   * 键盘浮在页面底部、占据下方 keyboardHeightVp；按钮底边（未避让时）位于
-   * pageH - BTN_MARGIN + btnDragY。只有底边低于键盘上沿才算被遮挡，此时抬高到
-   * 键盘上沿之上并保留 BTN_MARGIN 间距 —— 位移刚好够露出按钮，而不是无条件
-   * 上移整个键盘高度（按钮本来就高于键盘时不应有任何动作）。
-   *
-   * **拖动过程中必须返回 0**：避让量本身是由 btnDragY 推导出来的，若拖动时仍参与
-   * 计算，会得到恒等式「渲染位置 = -(BTN_MARGIN + 键盘高)」—— btnDragY 被完全抵消，
-   * 表现为键盘弹起后按钮怎么拖都不动。进入拖动前已把当时的避让量固化进 btnDragY
-   *（见 LongPressGesture.onAction），因此这里返回 0 不会造成跳动。
+   * 手势状态（长按拖拽后抑制本次点击）留在 FloatingBar 内部，
+   * 这里只回答「要不要先弹确认框」——「不再显示」偏好与确认弹窗都归页面所有。
    */
-  private keyboardLiftVp(): number {
-    if (this.btnDragging || this.keyboardHeightVp <= 0 || this.pageH <= 0) {
-      return 0;
-    }
-    const btnBottom: number = this.pageH - this.BTN_MARGIN + this.btnDragY;
-    const keyboardTop: number = this.pageH - this.keyboardHeightVp;
-    if (btnBottom <= keyboardTop) {
-      return 0;
-    }
-    return btnBottom - keyboardTop + this.BTN_MARGIN;
-  }
-
-  // 悬浮操作条宽度：刷新可用时为两段（刷新 | 设置），关闭刷新后只剩设置一段
-  private btnBarWidth(): number {
-    return this.refreshButtonEnabled ? this.BTN_SIZE * 2 + 8 : this.BTN_SIZE;
-  }
-
-  /**
-   * 把刷新按钮的拖拽位移限制在屏幕内，避免拖出可视区域后找不回来。
-   * 按钮右下角位于 (pageW - BTN_MARGIN + dx, pageH - BTN_MARGIN + dy)，
-   * 横向占用 btnBarWidth()、纵向占用 BTN_SIZE，据此反推位移的可用范围。
-   * 键盘遮挡不在这里预留 —— 那是 keyboardLiftVp 的职责，避免重复抬高。
-   */
-  private clampBtnOffset(): void {
-    if (this.pageW <= 0 || this.pageH <= 0) {
-      return;
-    }
-    const barW: number = this.btnBarWidth();
-    const maxDx: number = this.BTN_MARGIN;
-    const minDx: number = -(this.pageW - barW - this.BTN_MARGIN);
-    const maxDy: number = this.BTN_MARGIN;
-    const minDy: number = -(this.pageH - this.BTN_SIZE - this.BTN_MARGIN);
-    this.btnDragX = Math.min(maxDx, Math.max(minDx, this.btnDragX));
-    this.btnDragY = Math.min(maxDy, Math.max(minDy, this.btnDragY));
-  }
-
-  // 收起「长按可拖动」提示
-  private dismissRefreshHint(): void {
-    this.showRefreshHint = false;
-    if (this.refreshHintTimer !== -1) {
-      clearTimeout(this.refreshHintTimer);
-      this.refreshHintTimer = -1;
-    }
-  }
-
-  // 保存刷新按钮位置（拖动结束时调用）
-  private saveButtonOffset(): void {
-    try {
-      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      saveRefreshButtonOffset(ctx, this.btnDragX, this.btnDragY);
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'Failed to save refresh button offset');
+  private onFloatingRefresh(): void {
+    if (this.refreshSkipConfirm) {
+      this.doRefresh();
+    } else {
+      this.noMoreRefreshPrompt = false;
+      this.showRefreshConfirm();
     }
   }
 
@@ -1184,132 +1633,23 @@ struct Index {
   }
 
   /**
-   * 设置面板内容。
-   * 用官方组件（Toggle / Divider）与项目既有的语义化颜色资源，
-   * 深浅色由资源限定词自动适配，与页面其它部分风格一致。
+   * 设置面板的 builder。
+   *
+   * bindSheet 需要的是一个 CustomBuilder，因此这里保留一个极薄的 @Builder，
+   * 只做「属性进、回调出」的转接；面板内容本身在 components/SettingsSheet.ets，
+   * 那里全部使用官方组件（Toggle / Divider）与语义化颜色资源，深浅色自动适配。
    */
   @Builder
   settingsSheet() {
-    Column() {
-      // 标题栏自绘，配合 bindSheet 里的 showClose: false 使用。
-      //
-      // 为什么必须自绘：手机端用的 SheetType.CONTENT_COVER 是「内容全屏覆盖」形态，
-      // 系统在该形态下**不渲染标题栏与关闭按钮**（真机截图可见面板没有标题也没有 ✕，
-      // 只能靠返回手势退出）。而 CENTER 形态（平板）系统会渲染，所以那里必须
-      // 显式关掉 showClose，否则系统那颗与自绘的会叠在同一位置 —— 表现为一个
-      // 「圆形斜线 + 叉」的怪异图标，容易被误判为字形缺失。
-      Row() {
-        Text($r('app.string.settings_title'))
-          .fontSize(20)
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.text_primary'))
-          .layoutWeight(1)
-        // 关闭：官方符号 xmark（系统资源码位 0xF0056），外面套一个圆形浅底并加阴影，
-        // 与系统半模态自带的关闭按钮观感一致（系统那颗也是「圆形浅底 + 叉」）。
-        // 用 Row 包一层是为了确保符号在圆内居中，SymbolGlyph 直接设宽高不保证居中。
-        Row() {
-          SymbolGlyph($r('sys.symbol.xmark'))
-            .fontSize(16)
-            .fontColor([$r('app.color.text_secondary')])
-        }
-        .width(36)
-        .height(36)
-        .borderRadius(18)
-        .backgroundColor($r('app.color.surface_tile'))
-        .justifyContent(FlexAlign.Center)
-        .alignItems(VerticalAlign.Center)
-        .shadow({
-          radius: 8,
-          color: $r('app.color.floating_button_shadow'),
-          offsetX: 0,
-          offsetY: 2
-        })
-        .onClick(() => {
-          this.showSettings = false;
-        })
+    SettingsSheet({
+      refreshButtonEnabled: this.refreshButtonEnabled,
+      onToggleRefresh: (enabled: boolean) => this.onToggleRefreshButton(enabled),
+      onClearCache: () => this.clearAppCache(),
+      onOpenFeedback: () => this.openInSystemBrowser(FEEDBACK_URL),
+      onClose: () => {
+        this.showSettings = false;
       }
-      .width('100%')
-      .height(56)
-      .padding({ left: 20, right: 12, top: 8 })
-      .alignItems(VerticalAlign.Center)
-
-      Divider().color($r('app.color.progress_track')).opacity(0.15)
-
-      // 刷新按钮开关
-      Row() {
-        Column() {
-          Text($r('app.string.settings_refresh_button'))
-            .fontSize(15)
-            .fontColor($r('app.color.text_primary'))
-          Text($r('app.string.settings_refresh_button_desc'))
-            .fontSize(12)
-            .fontColor($r('app.color.text_secondary'))
-            .margin({ top: 3 })
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-
-        Toggle({ type: ToggleType.Switch, isOn: this.refreshButtonEnabled })
-          .onChange((isOn: boolean) => {
-            this.onToggleRefreshButton(isOn);
-          })
-      }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 16, bottom: 16 })
-      .alignItems(VerticalAlign.Center)
-
-      Divider().color($r('app.color.progress_track')).opacity(0.15)
-
-      // 清理应用缓存
-      Row() {
-        Column() {
-          Text($r('app.string.settings_clear_cache'))
-            .fontSize(15)
-            .fontColor($r('app.color.text_primary'))
-          Text($r('app.string.settings_clear_cache_desc'))
-            .fontSize(12)
-            .fontColor($r('app.color.text_secondary'))
-            .margin({ top: 3 })
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-      }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 16, bottom: 16 })
-      .onClick(() => {
-        this.clearAppCache();
-      })
-
-      Divider().color($r('app.color.progress_track')).opacity(0.15)
-
-      // 问题反馈：按官方规范用 Want(action=viewData + browsable) 交给系统浏览器打开，
-      // 不走应用内 WebView —— 用户需要看到地址栏，也便于登录 GitHub。
-      Row() {
-        Column() {
-          Text($r('app.string.settings_feedback'))
-            .fontSize(15)
-            .fontColor($r('app.color.text_primary'))
-          Text($r('app.string.settings_feedback_desc'))
-            .fontSize(12)
-            .fontColor($r('app.color.text_secondary'))
-            .margin({ top: 3 })
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-
-        SymbolGlyph($r('sys.symbol.arrow_right_up_and_square'))
-          .fontSize(16)
-          .fontColor([$r('app.color.text_secondary')])
-      }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 16, bottom: 16 })
-      .alignItems(VerticalAlign.Center)
-      .onClick(() => {
-        this.openInSystemBrowser(FEEDBACK_URL);
-      })
-    }
-    .width('100%')
-    .backgroundColor($r('app.color.surface_card'))
+    })
   }
 
   // 设置面板：刷新按钮开关，立即生效并持久化
@@ -1353,23 +1693,34 @@ struct Index {
       this.isError = false;
     } catch (err) {
       hilog.error(DOMAIN, TAG, 'refreshPage failed, fallback to loadUrl');
-      this.navigateToUrl(DEEPSEEK_URL);
+      // 降级也必须留在当前页：直接回首页会把用户正在进行的会话丢掉。
+      // getUrl 在控制器未挂载时同样会抛异常，因此单独兜一层。
+      let current: string = '';
+      try {
+        current = this.controller.getUrl();
+      } catch (e) {
+        current = '';
+      }
+      this.navigateToUrl(current !== '' ? current : DEEPSEEK_URL);
     }
   }
 
   // 注册 Web 下载代理：处理下载开始/进度/完成/失败，下载完成后可另存至公开目录
   private setupDownloadDelegate(): void {
     try {
-      // 用 GUID 映射下载沙箱路径，避免多个并发生下载时路径覆盖
-      const downloadPathMap: Record<string, string> = {};
+      // guid → 沙箱中转路径。落盘文件名为 `<guid>_<净化后的原始名>`：
+      // 既避免同名并发下载互相覆盖，又能从路径反推出用户可见的文件名。
+      const downloadPathMap: Map<string, string> = new Map<string, string>();
 
       this.delegate.onBeforeDownload((webDownloadItem: webview.WebDownloadItem) => {
-        const fileName: string = webDownloadItem.getSuggestedFileName();
         const guid: string = webDownloadItem.getGuid();
-        hilog.info(DOMAIN, TAG, 'Download start: %{public}s, guid=%{public}s', fileName, guid);
-        const cachePath: string =
-          this.getUIContext().getHostContext()!.cacheDir + '/web/' + fileName;
-        downloadPathMap[guid] = cachePath;
+        const cacheDir: string = this.getUIContext().getHostContext()!.cacheDir;
+        // 服务端给出的文件名不可信：先净化，避免路径穿越与非法字符导致落盘失败
+        const safeName: string = sanitizeFileName(webDownloadItem.getSuggestedFileName());
+        ensureDownloadTempDir(cacheDir);
+        const cachePath: string = buildDownloadTempPath(cacheDir, guid, safeName);
+        hilog.info(DOMAIN, TAG, 'Download start: %{public}s, guid=%{public}s', safeName, guid);
+        downloadPathMap.set(guid, cachePath);
         webDownloadItem.start(cachePath);
       });
 
@@ -1380,14 +1731,15 @@ struct Index {
 
       this.delegate.onDownloadFinish((webDownloadItem: webview.WebDownloadItem) => {
         const guid: string = webDownloadItem.getGuid();
-        const savePath: string = downloadPathMap[guid];
+        const savePath: string | undefined = downloadPathMap.get(guid);
         hilog.info(DOMAIN, TAG, 'Download finish: %{public}s', guid);
+        downloadPathMap.delete(guid);
         // 此处不再提示"下载完成"：文件此刻只在应用沙箱内，尚未落到用户可见目录。
         // 保存成功由 saveToPublicDownload 里的 toast_save_done 提示；用户若取消
         // 保存对话框则不作提示 —— 原先在此处提前弹"下载完成"，取消后会造成误导。
         if (savePath) {
-          this.saveToPublicDownload(webDownloadItem.getSuggestedFileName(), savePath);
-          downloadPathMap[guid] = '';
+          // 文件名以沙箱实际落盘的名字为准（已净化，且与待复制的中转文件一一对应）
+          this.saveToPublicDownload(fileNameFromTempPath(savePath, guid), savePath);
         } else {
           hilog.warn(DOMAIN, TAG, 'Download finished but sandbox path missing, guid=%{public}s', guid);
         }
@@ -1397,8 +1749,12 @@ struct Index {
         const guid: string = webDownloadItem.getGuid();
         hilog.error(DOMAIN, TAG, 'Download failed: code=%{public}d, guid=%{public}s',
           webDownloadItem.getLastErrorCode(), guid);
-        // 清理失败下载的路径映射
-        downloadPathMap[guid] = '';
+        // 清掉半截的中转文件与映射，避免残留占用空间
+        const failedPath: string | undefined = downloadPathMap.get(guid);
+        if (failedPath) {
+          removeDownloadTempFile(failedPath);
+          downloadPathMap.delete(guid);
+        }
         this.getUIContext().getPromptAction().showToast({
           message: $r('app.string.toast_download_fail'),
           duration: 2000
@@ -1425,6 +1781,8 @@ struct Index {
       const documentViewPicker = new picker.DocumentViewPicker(context);
       documentViewPicker.save(documentSaveOptions).then((result: Array<string>) => {
         if (result.length === 0 || !result[0]) {
+          // 用户取消或未选择目录：清掉中转文件，避免沙箱里堆积副本
+          removeDownloadTempFile(srcPath);
           return;
         }
         const uri: string = result[0];
@@ -1455,9 +1813,13 @@ struct Index {
           if (dstFile) {
             fs.closeSync(dstFile);
           }
+          // 无论复制成功与否，中转文件都不再需要：成功了内容已进公共目录，
+          // 失败了也没有保留价值。缺了这一步，每下载一次就在沙箱里永久留一份副本。
+          removeDownloadTempFile(srcPath);
         }
       }).catch((err: BusinessError) => {
         hilog.info(DOMAIN, TAG, 'User cancelled save dialog');
+        removeDownloadTempFile(srcPath);
       });
     } catch (err) {
       hilog.info(DOMAIN, TAG, 'Save dialog not supported on this device');
