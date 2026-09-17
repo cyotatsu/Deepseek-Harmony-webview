@@ -167,10 +167,21 @@ export const EDITOR_IMAGE_MAX_VH: number = 20;
 export function buildEditorCardCss(): string {
   return 'div.' + EDITOR_CARD_CLASS + '{display:flex !important;flex-direction:column !important;' +
     'max-height:var(' + EDITOR_MAX_VAR + ',' + COMPOSER_FALLBACK_VH + 'vh) !important;' +
-    'overflow:hidden !important;}' +
+    // 用 auto 而不是 hidden：卡片被限高后内容可能仍然超高（图片 + 多行文本），
+    // hidden 会把最底下的按钮行直接裁掉；auto 让卡片成为**滚动容器**，
+    // 于是下面那条 sticky 的按钮行才有意义 —— 它会钉在卡片可视底边，永远露着。
+    'overflow-y:auto !important;overflow-x:hidden !important;}' +
     'div.' + EDITOR_CARD_CLASS + ' > *{max-height:none !important;flex:0 0 auto !important;}' +
     'div.' + EDITOR_CARD_CLASS + ' textarea,div.' + EDITOR_CARD_CLASS +
     ' [contenteditable="true"]{flex:1 1 auto !important;min-height:0 !important;' +
+    'max-height:none !important;overflow-y:auto !important;}' +
+    // **最关键的一条**：只让 textarea 自己可收缩是不够的 —— 它的包装层
+    // （实测 DIV._646a522）是卡片的直接子元素，被上面那条 `> *{flex:0 0 auto}` 冻住了，
+    // 于是长文本时整列都收不下去，卡片 overflow:hidden 就把底部的按钮行裁掉。
+    // 因此「装着输入框的那一支子元素」必须吸收收缩并自己滚动（结构化 :has 匹配，
+    // 不依赖站点哈希类名）。
+    'div.' + EDITOR_CARD_CLASS + ' > *:has(textarea),div.' + EDITOR_CARD_CLASS +
+    ' > *:has([contenteditable="true"]){flex:1 1 auto !important;min-height:0 !important;' +
     'max-height:none !important;overflow-y:auto !important;}' +
     // 按钮行：sticky 贴卡片底部。padding-bottom 兜住卡片自身的底部内边距，
     // 否则按钮行会有一部分落在卡片 padding 里被 overflow:hidden 裁掉一点边
@@ -468,27 +479,29 @@ export function buildComposerAutoHideScript(): string {
       function styleOf(el) {
         try { return window.getComputedStyle(el); } catch (e) { return null; }
       }
-      // 从元素向上找「底部固定容器」
+      // 绝不允许隐藏「当前聚焦元素所在的容器」。
+      //
+      // 实机踩坑：编辑态下若把包含正在编辑的文本域的容器 display:none 掉，
+      // 浏览器会立刻让它失焦并收起键盘 —— 表现就是「键盘闪现」：
+      // 日志里能看到 hide 之后约 35ms 键盘高度就变回 0，然后站点再聚焦、再被收起，循环往复。
+      function containsActive(el) {
+        var ae = document.activeElement;
+        if (!ae || !el) { return false; }
+        return el === ae || !!(el.contains && el.contains(ae));
+      }
+      // 从元素向上找「底部固定容器」。**只认 fixed / sticky**：
+      // 历史版本还允许「底边贴底的非定位元素」，结果编辑态下把消息气泡里的编辑卡片
+      // 当成了主对话框藏掉，键盘立刻收起（键盘闪现）。定位方式是这个判据的关键。
       function findBottomCard(el) {
-        var de = document.documentElement;
-        var vh = de ? de.clientHeight : 0;
         var node = el;
         var depth = 0;
-        var fixedCard = null;
-        var nearBottom = null;
         while (node && node !== document.body && depth < 8) {
           var cs = styleOf(node);
-          if (cs) {
-            if (cs.position === 'fixed' || cs.position === 'sticky') { fixedCard = node; break; }
-            var r = node.getBoundingClientRect();
-            if (vh > 0 && r.height > 0 && r.height <= vh * 0.45 && r.bottom >= vh - 48) {
-              nearBottom = node;
-            }
-          }
+          if (cs && (cs.position === 'fixed' || cs.position === 'sticky')) { return node; }
           node = node.parentElement;
           depth++;
         }
-        return fixedCard || nearBottom;
+        return null;
       }
       // 元素是否位于底部固定容器内（是则它本身就是主对话框的一部分）
       function isInBottomCard(el) {
@@ -523,7 +536,9 @@ export function buildComposerAutoHideScript(): string {
           if (cs.display === 'none' || cs.visibility === 'hidden') { continue; }
           var r = el.getBoundingClientRect();
           if (r.width < vw * 0.5 || r.height <= 0) { continue; }
-          if (r.height > vh * 0.5) { continue; }
+          // 主对话框是个矮条；消息列表（ds-virtual-list，实测 h≈687）也满足
+          // 「sticky + 贴底」，一旦被当成主对话框就会被整块隐藏。用高度把它排除掉。
+          if (r.height > vh * 0.4) { continue; }
           // 底边贴底：主对话框下面还可能有「内容由 AI 生成」那一行，因此留 32px 容差；
           // 该行的外层包装与主对话框同为 sticky，取面积最大的那个即整个底部区域
           if (r.bottom < vh - 32) { continue; }
@@ -533,9 +548,15 @@ export function buildComposerAutoHideScript(): string {
         return best;
       }
 
-      // 内联编辑卡片 = 从被聚焦的编辑元素向上找到「同时含有取消 / 保存这类按钮」的最近祖先。
-      // 用它来：① 限高（按钮不被顶出可视区）② 点击卡片空白处能聚焦到编辑框 ③ 滚动到按钮可见
-      var CANCEL_TEXT = /^(取消|关闭|保存|确认|完成|发送|cancel|save|done|send)$/i;
+      // 内联编辑卡片 = 从被聚焦的编辑元素向上找到**最近的**、含有「取消 / 保存 / 发送」
+      // 这类操作按钮的祖先。
+      //
+      // 两个坑都踩过：
+      //   · 按钮集里不能放「关闭」—— 文本域自带清除按钮就可能带 aria-label="关闭"，
+      //     会让最近祖先只框住文本域本身；
+      //   · 不能取「最外层」匹配 —— 整张消息列表也在编辑卡片外面，取最外层会拿到
+      //     消息列表（实测 ds-virtual-list），限高后把编辑卡片压扁、按钮反而看不见了。
+      var CARD_BTN_TEXT = /^(取消|保存|发送|确认|cancel|save|send|done)$/i;
       function findEditCard(el) {
         var node = el;
         var depth = 0;
@@ -543,13 +564,52 @@ export function buildComposerAutoHideScript(): string {
           var btns = node.querySelectorAll('button,[role="button"]');
           for (var i = 0; i < btns.length; i++) {
             var t = String(btns[i].innerText || btns[i].textContent || '').trim();
-            var lab = String(btns[i].getAttribute('aria-label') || '').trim();
-            if (CANCEL_TEXT.test(t) || CANCEL_TEXT.test(lab)) { return node; }
+            if (CARD_BTN_TEXT.test(t)) { return node; }
           }
           node = node.parentElement;
           depth++;
         }
         return null;
+      }
+
+      // 按钮行的直接父元素（卡片的某个子元素）—— 标上类后由 CSS 做 sticky 贴底。
+      // 取「卡片里最外层那个含按钮的子元素」：sticky 的 bottom:0 是相对卡片的 padding box 的，
+      // 加在更深的层级上贴的就不是卡片底边了。
+      function findActionRow(card, el) {
+        if (!card || !card.children) { return null; }
+        var kids = card.children;
+        var hit = null;
+        for (var i = 0; i < kids.length; i++) {
+          var k = kids[i];
+          if (k.contains && k.contains(el)) { hit = k; }
+        }
+        if (!hit) { return null; }
+        // 该子元素里必须真的有取消 / 保存 / 发送这类按钮，否则不是按钮行
+        var btns = hit.querySelectorAll('button,[role="button"]');
+        for (var j = 0; j < btns.length; j++) {
+          var t = String(btns[j].innerText || btns[j].textContent || '').trim();
+          if (CARD_BTN_TEXT.test(t)) { return hit; }
+        }
+        return null;
+      }
+
+      // 容器里可能**同时**装着「内联编辑卡片」和「主对话框」（实测手机端就是）
+      // —— 那就不能整块隐藏（会把正在编辑的输入框一起藏掉，键盘立刻收起），
+      // 只隐藏其中「不含当前焦点」且贴底的那个子元素，也就是主对话框本身。
+      function hideTargetFor(card) {
+        if (!card) { return null; }
+        if (!containsActive(card)) { return card; }
+        var kids = card.children;
+        var best = null;
+        var bestBottom = -1;
+        for (var i = 0; i < kids.length; i++) {
+          var k = kids[i];
+          if (k === document.activeElement || containsActive(k)) { continue; }
+          var r = k.getBoundingClientRect();
+          if (r.height <= 0 || r.width <= 0) { continue; }
+          if (r.bottom > bestBottom) { bestBottom = r.bottom; best = k; }
+        }
+        return best;
       }
 
       window.__dsApplyComposerAutoHide = function () {
@@ -564,21 +624,32 @@ export function buildComposerAutoHideScript(): string {
           var card = mainEdit ? findBottomCard(mainEdit) : null;
           // 主输入框在编辑态会退化成占位元素、不再是可编辑节点，
           // 因此上面这条路可能落空，用独立的几何扫描兜底；
-          // 再退一步用「上次隐藏的那个」—— 它已经 display:none，几何扫描会跳过它，
-          // 不记住引用就会「藏起来后再也恢复不了」
+          // 再退一步用「上次隐藏的那个」的父元素 —— 它已经 display:none，
+          // 几何扫描会跳过它，不记住引用就会「藏起来后再也恢复不了」
           if (!card && window.__dsHiddenCard && document.contains(window.__dsHiddenCard)) {
-            card = window.__dsHiddenCard;
+            card = window.__dsHiddenCard.parentElement || window.__dsHiddenCard;
           }
           if (!card) { card = findBottomCardByGeometry(); }
+          // 真正隐藏谁：容器里若同时装着编辑卡片和主对话框，只隐藏主对话框那一块 ——
+          // 整块藏掉会把正在编辑的输入框一起藏掉，它立刻失焦、键盘随即收起（键盘闪现）。
+          var target = hideTargetFor(card);
+          // 万一之前错误地藏过含焦点的容器，立刻纠正回来
+          if (window.__dsHiddenCard && containsActive(window.__dsHiddenCard)) {
+            window.__dsHiddenCard.classList.remove('${COMPOSER_HIDDEN_CLASS}');
+            window.__dsHiddenCard = null;
+          }
           var keyboardUp = !!window.__dsKeyboardUp;
           // 内联编辑态：焦点在可编辑元素上，且它不在底部固定容器里
           var inlineEdit = keyboardUp && aeEditable && !isInBottomCard(ae);
-          if (card) {
-            if (inlineEdit) {
-              card.classList.add('${COMPOSER_HIDDEN_CLASS}');
-              window.__dsHiddenCard = card;
-            } else {
-              card.classList.remove('${COMPOSER_HIDDEN_CLASS}');
+          if (inlineEdit) {
+            if (target) {
+              target.classList.add('${COMPOSER_HIDDEN_CLASS}');
+              window.__dsHiddenCard = target;
+            }
+          } else {
+            if (target) { target.classList.remove('${COMPOSER_HIDDEN_CLASS}'); }
+            if (window.__dsHiddenCard) {
+              window.__dsHiddenCard.classList.remove('${COMPOSER_HIDDEN_CLASS}');
               window.__dsHiddenCard = null;
             }
           }
@@ -588,19 +659,42 @@ export function buildComposerAutoHideScript(): string {
           var editCard = null;
           if (aeEditable && !isInBottomCard(ae)) {
             editCard = findEditCard(ae);
-            if (editCard) {
-              editCard.classList.add('${EDITOR_CARD_CLASS}');
-              if (window.__dsEditCard && window.__dsEditCard !== editCard) {
-                window.__dsEditCard.classList.remove('${EDITOR_CARD_CLASS}');
+          } else if (window.__dsEditCard && document.contains(window.__dsEditCard) &&
+            window.__dsEditCard.querySelector('${EDITABLE_SELECTOR}')) {
+            // **收起键盘后编辑态仍然开着**（焦点可能已经不在输入框上）。
+            // 此时如果撤掉标记，限高与粘性按钮行会一起失效，卡片长高后按钮被裁掉 ——
+            // 实机现象就是「输入完收起键盘，按钮显示不全」。只要卡片还在，就继续标着。
+            editCard = window.__dsEditCard;
+          }
+          if (editCard) {
+            editCard.classList.add('${EDITOR_CARD_CLASS}');
+            if (window.__dsEditCard && window.__dsEditCard !== editCard) {
+              window.__dsEditCard.classList.remove('${EDITOR_CARD_CLASS}');
+            }
+            window.__dsEditCard = editCard;
+            // 按钮行（卡片的那个含按钮的子元素）单独标类 → CSS 给它 sticky 贴底，
+            // 这样即使站点把按钮行放在卡片中间、后面还有别的节点，按钮也不会被卷走。
+            // 键盘已收起时焦点不在输入框上，改用卡片里的输入框来定位按钮行。
+            var rowAnchor = aeEditable ? ae : editCard.querySelector('${EDITABLE_SELECTOR}');
+            var row = findActionRow(editCard, rowAnchor);
+              if (window.__dsActionRow && window.__dsActionRow !== row) {
+                window.__dsActionRow.classList.remove('${EDITOR_ACTION_ROW_CLASS}');
+                window.__dsActionRow = null;
               }
-              window.__dsEditCard = editCard;
+              if (row) {
+                row.classList.add('${EDITOR_ACTION_ROW_CLASS}');
+                window.__dsActionRow = row;
+              }
               // 卡片贴底对齐滚动：文本域在上面、按钮行在下面，
               // block:'end' 能保证按钮行落在可视区内（居中反而可能把按钮推到键盘后面）
               try { editCard.scrollIntoView({ block: 'end' }); } catch (e4) { }
-            }
           } else if (window.__dsEditCard) {
             window.__dsEditCard.classList.remove('${EDITOR_CARD_CLASS}');
             window.__dsEditCard = null;
+            if (window.__dsActionRow) {
+              window.__dsActionRow.classList.remove('${EDITOR_ACTION_ROW_CLASS}');
+              window.__dsActionRow = null;
+            }
           }
 
           window.__dsComposerAutoHideInfo = {
@@ -614,7 +708,27 @@ export function buildComposerAutoHideScript(): string {
             cardH: card ? Math.round(card.getBoundingClientRect().height) : 0,
             editCardCls: editCard ? String(editCard.className || '').slice(0, 40) : '',
             editCardH: editCard ? Math.round(editCard.getBoundingClientRect().height) : 0,
-            editCardMax: String((styleOf(editCard) || {}).maxHeight || '')
+            editCardMax: String((styleOf(editCard) || {}).maxHeight || ''),
+            // 祖先链诊断：编辑卡片到底是哪一层、限高有没有落在它身上。
+            // 只有实机拿得到真实结构（站点类名是哈希的，猜不出来），出问题时看这一段即可。
+            editChain: (function () {
+              try {
+                var out = [];
+                var n = ae;
+                var d = 0;
+                while (n && n !== document.body && d < 6) {
+                  var cs = styleOf(n) || {};
+                  out.push(String(n.tagName) + '.' + String(n.className || '').split(' ')[0] +
+                    '(h' + Math.round(n.getBoundingClientRect().height) +
+                    ',mh' + String(cs.maxHeight || '') +
+                    ',of' + String(cs.overflowY || '').charAt(0) +
+                    ',fx' + String(cs.flexGrow || '') + ')');
+                  n = n.parentElement;
+                  d++;
+                }
+                return out.join(' < ');
+              } catch (eCh) { return ''; }
+            })()
           };
           return 'ok';
         } catch (e3) {
@@ -666,6 +780,50 @@ export function buildComposerAutoHideScript(): string {
       }, true);
       window.addEventListener('resize', function () { window.__dsApplyComposerAutoHide(); });
 
+      // 站点在输入（尤其是回车换行）时会重建编辑卡片的节点，我加的两个类会跟着节点一起丢，
+      // CSS 限高随即失效、按钮又被裁掉 —— 实机现象就是「一按回车就复现」。
+      // 这里把「重新标记」做成一条很轻的独立路径：只从当前焦点向上走几层，
+      // 不跑几何扫描，因此可以挂在 DOM 变化与输入事件上频繁触发。
+      function markEditCardNow() {
+        try {
+          var ae = document.activeElement;
+          if (!ae || !ae.matches || !ae.matches('${EDITABLE_SELECTOR}')) { return; }
+          if (isInBottomCard(ae)) { return; }
+          var card = findEditCard(ae);
+          if (card && !card.classList.contains('${EDITOR_CARD_CLASS}')) {
+            if (window.__dsEditCard && window.__dsEditCard !== card) {
+              window.__dsEditCard.classList.remove('${EDITOR_CARD_CLASS}');
+            }
+            card.classList.add('${EDITOR_CARD_CLASS}');
+            window.__dsEditCard = card;
+          }
+          var row = card ? findActionRow(card, ae) : null;
+          if (row && !row.classList.contains('${EDITOR_ACTION_ROW_CLASS}')) {
+            if (window.__dsActionRow && window.__dsActionRow !== row) {
+              window.__dsActionRow.classList.remove('${EDITOR_ACTION_ROW_CLASS}');
+            }
+            row.classList.add('${EDITOR_ACTION_ROW_CLASS}');
+            window.__dsActionRow = row;
+          }
+        } catch (eMk) { }
+      }
+      window.__dsMarkEditCard = markEditCardNow;
+
+      // 输入 / 回车会重建节点：这两个事件立刻重标一次
+      document.addEventListener('input', function () { markEditCardNow(); }, true);
+      document.addEventListener('keyup', function () { markEditCardNow(); }, true);
+      // 兜底：站点也可能在别处重建（例如换行后重排），用 observer 观察整棵树，
+      // 变化后 60ms 防抖重标一次（重标本身很轻，不做几何扫描）
+      if (window.MutationObserver && !window.__dsEditObserver) {
+        window.__dsEditObserver = new MutationObserver(function () {
+          if (window.__dsEditTimer) { clearTimeout(window.__dsEditTimer); }
+          window.__dsEditTimer = setTimeout(function () { markEditCardNow(); }, 60);
+        });
+        try {
+          window.__dsEditObserver.observe(document.body, { childList: true, subtree: true });
+        } catch (eOb) { }
+      }
+
       // 点卡片空白处也能聚焦到编辑框：编辑卡片里除了文本域还有留白，
       // 用户点上去本该开始编辑，但站点没把点击转发给文本域，于是「点了没反应」。
       // 只在焦点落在非交互元素上时补一次 focus（用户的手指就是 user activation，
@@ -705,6 +863,47 @@ export function buildComposerAutoHideScript(): string {
       return 'installed';
     } catch (e) {
       return 'install-error';
+    }
+  })();`;
+}
+
+/**
+ * 监听「切换到另一个会话」，用于让应用侧重新加载页面、同步服务端最新内容。
+ *
+ * 背景：站点是 SPA。切会话走的是前端路由，用的是**内存里缓存的会话数据**，
+ * 不会重新向服务端拉取 —— 所以在网页端 / 其它设备刚发过消息时，切进来看到的还是旧的。
+ * 应用侧没有它的数据接口，唯一能保证拿到最新内容的手段就是让页面**重新加载**一次。
+ *
+ * 路由变化不像整页加载那样会触发 onPageEnd，因此这里在页面内自己盯：
+ * 劫持 pushState / replaceState、监听 popstate，另加 800ms 兜底轮询
+ * （有些跳转不经过 history API）；只有「会话路由」变化才上报，避免站内其它跳转误触发。
+ */
+export function buildConversationWatchScript(): string {
+  return `(function () {
+    try {
+      if (window.__dsConvWatch) { return 'already'; }
+      window.__dsConvWatch = true;
+      function convKey() {
+        var p = String(location.pathname || '');
+        return /^\\/a\\/chat/.test(p) ? p : '';
+      }
+      window.__dsConvKey = convKey();
+      function report() {
+        var k = convKey();
+        if (k && k !== window.__dsConvKey) {
+          window.__dsConvKey = k;
+          try { console.info('__dsConvChanged:' + k); } catch (e0) { }
+        }
+      }
+      var ps = history.pushState;
+      var rs = history.replaceState;
+      history.pushState = function () { var r = ps.apply(this, arguments); setTimeout(report, 0); return r; };
+      history.replaceState = function () { var r = rs.apply(this, arguments); setTimeout(report, 0); return r; };
+      window.addEventListener('popstate', function () { setTimeout(report, 0); });
+      setInterval(report, 800);
+      return 'installed';
+    } catch (e) {
+      return 'watch-error';
     }
   })();`;
 }

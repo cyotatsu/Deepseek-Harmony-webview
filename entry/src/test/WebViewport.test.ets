@@ -303,11 +303,14 @@ export default function webViewportTest() {
     });
 
     it('finds_the_composer_as_a_bottom_fixed_container', 0, () => {
+      // 只认 fixed / sticky：曾经允许「底边贴底的非定位元素」，
+      // 结果编辑态下把消息气泡里的编辑卡片当成主对话框藏掉，键盘立刻收起
       expect(script).assertContain("position === 'fixed'");
       expect(script).assertContain("position === 'sticky'");
-      // 退路：底边贴底 + 高度不超过可视高度 45% 的最高祖先
-      expect(script).assertContain('vh * 0.45');
-      expect(script).assertContain('vh - 48');
+      // 几何扫描仍然保留贴底 / 半屏等约束（高度阈值收到 0.4：
+      // 消息列表 ds-virtual-list 也满足「sticky + 贴底」，会被误当成主对话框整块隐藏）
+      expect(script).assertContain('vh * 0.4');
+      expect(script).assertContain('vh - 32');
     });
 
     // 关键：主输入框自己也在固定底栏里，只有「焦点不在固定底栏内」才算内联编辑
@@ -326,6 +329,19 @@ export default function webViewportTest() {
     it('reports_its_state_for_diagnostics', 0, () => {
       expect(script).assertContain('__dsComposerAutoHideInfo');
       expect(script).assertContain('cardPos');
+    });
+
+    // 关键回归（键盘闪现）：绝不能隐藏「当前聚焦元素所在的容器」——
+    // 那会让正在编辑的输入框立刻失焦、键盘随即收起（实机复现：hide 后约 35ms 键盘变 0）。
+    // 容器里同时装着编辑卡片与主对话框时，只隐藏「不含焦点且贴底」的那个子元素。
+    it('never_hides_a_container_holding_the_focused_element', 0, () => {
+      expect(script).assertContain('containsActive');
+      expect(script).assertContain('hideTargetFor');
+      // 已经错误隐藏过的要能纠正回来
+      expect(script).assertContain('__dsHiddenCard');
+      // 底部固定容器只认 fixed / sticky，避免把消息气泡里的编辑卡片当成主对话框
+      expect(script).assertContain("position === 'fixed'");
+      expect(script).assertContain("position === 'sticky'");
     });
 
     // 问题一：含图片 + 长文本时，卡片的取消/保存按钮会被挤出可视区。
