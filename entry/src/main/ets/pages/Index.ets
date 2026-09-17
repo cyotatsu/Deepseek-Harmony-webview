@@ -9,7 +9,6 @@ import { resourceManager, i18n } from '@kit.LocalizationKit';
 import { connection } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window, promptAction } from '@kit.ArkUI';
-import { inputMethod } from '@kit.IMEKit';
 import { camera, cameraPicker } from '@kit.CameraKit';
 import { UPLOAD_FILTER_EXTENSIONS } from '../common/AllowedFileExtensions';
 import { DEEPSEEK_URL, DEEPSEEK_HOST, FEEDBACK_URL,
@@ -296,9 +295,20 @@ struct Index {
               const msg: string = event && event.message ? event.message.getMessage() : '';
               if (msg.indexOf('__dsFocus:') === 0) {
                 hilog.info(DOMAIN, TAG, 'Edit focus reported: %{public}s', msg);
-                // 主输入框（composer）本身正常，无需兜底
-                if (msg !== '__dsFocus:composer') {
-                  this.ensureSoftKeyboardForEdit();
+                // 只对「用户真实操作导致的聚焦」兜底：
+                //   inline   —— 用户点了编辑框 / 站点渲染完成后聚焦
+                //   card-tap —— 用户点了卡片空白处（脚本补的聚焦）
+                // **必须忽略 retry / refocus**：那两个是兜底自己造成的焦点事件，
+                // 一旦也当成触发条件就会形成「兜底 → blur+focus → 再兜底」的死循环，
+                // 表现就是键盘不停闪现（实机已复现）。再加一道冷却作为双保险。
+                if (msg === '__dsFocus:inline' || msg === '__dsFocus:card-tap') {
+                  const now: number = Date.now();
+                  if (now - this.lastKeyboardFallbackAt > Index.KEYBOARD_FALLBACK_COOLDOWN_MS) {
+                    this.lastKeyboardFallbackAt = now;
+                    this.ensureSoftKeyboardForEdit();
+                  } else {
+                    hilog.info(DOMAIN, TAG, 'Keyboard fallback in cooldown, skipped');
+                  }
                 }
               }
             } catch (err) {
@@ -354,6 +364,7 @@ struct Index {
             // 装上「编辑历史消息 + 键盘弹出时隐藏主对话框」的脚本，
             // 并把当前键盘状态同步过去（可能在键盘已经弹着的时候页面才加载完）
             this.applyComposerAutoHide();
+
             // 打印一次运行时视口诊断，便于实机确认 viewport 是否真的生效
             this.probeViewport();
             this.updateBackButtonState();
@@ -631,6 +642,11 @@ struct Index {
     this.refreshPage();
   }
 
+  /** 页面隐藏（含切到后台）：记住时间点 */
+  onPageHide(): void {
+    this.pageHiddenAt = Date.now();
+  }
+
   onPageShow(): void {
     if (this.deepLinkUrl && this.deepLinkUrl !== '') {
       this.navigateToUrl(this.deepLinkUrl);
@@ -641,6 +657,15 @@ struct Index {
     // 就会重新取样，因此在真机上「输入一段长文本 → 切后台再切回 → 看日志」
     // 就能拿到输入框此时的实际高度与样式，不必接调试器。
     this.probeViewport();
+    // 从后台回到前台：重载页面同步服务端最新内容。
+    // 站内切会话、弹面板不会走到这里，因此日常使用不会闪；
+    // 「去别的设备 / 网页发完消息再回来」正是这条路径。
+    if (this.pageHiddenAt > 0 && Date.now() - this.pageHiddenAt > 5000) {
+      hilog.info(DOMAIN, TAG, 'Returned to foreground after %{public}d ms',
+        Date.now() - this.pageHiddenAt);
+      this.refreshConversationFromServer();
+    }
+    this.pageHiddenAt = 0;
   }
 
   // 响应热启动时 onNewWant 设置的 deepLinkUrl 变化（onPageShow 仅在冷/温启动触发）
@@ -862,18 +887,19 @@ struct Index {
   /**
    * 兜底拉起软键盘（仅在「内联编辑态聚焦了编辑框、但键盘确实没弹起来」时触发）。
    *
-   * 两级手段，先轻后重：
-   *   1. `inputMethod.getController().showTextInput(RequestKeyboardReason.TOUCH)`
-   *      —— 直接请输入法「显示文本输入」。它是**不需要系统权限**的
-   *      （`showSoftKeyboard()` 需要 `ohos.permission.CONNECT_IME_ABILITY`，
-   *      普通应用调用会抛 201，因此不能用）；当前没有绑定编辑框时会抛 12800003。
-   *   2. 临时把键盘策略切回 DEFAULT + 让网页重新 focus 一次当前编辑元素 ——
-   *      DISABLE_AUTO_KEYBOARD_ON_ACTIVE 保证的是「组件激活状态切换时不自动弹键盘」，
-   *      本身不阻止焦点驱动那一路；编辑态下组件激活与页面聚焦常常同时发生，
-   *      切回 DEFAULT 能让内核的焦点驱动路径生效。
+   * 只做一件事：临时把键盘策略切回 DEFAULT，并让网页重新 focus 一次当前编辑元素 ——
+   * DISABLE_AUTO_KEYBOARD_ON_ACTIVE 保证的是「组件激活状态切换时不自动弹键盘」，
+   * 本身不阻止焦点驱动那一路；编辑态下组件激活与页面聚焦常常同时发生，
+   * 切回 DEFAULT 能让内核的焦点驱动路径生效。切换窗口只保留 150ms，
+   * 用完全局立即恢复防线（那是「点图片不弹键盘」的保护）。
    *
-   * 之后无论成败都恢复 DISABLE_AUTO_KEYBOARD_ON_ACTIVE —— 那是「点图片不弹键盘」的
-   * 防线之一，不能长期关掉。
+   * 两条实机结论决定了这里的写法：
+   *   1. **不能调 `inputMethod.showTextInput()`**：实测 WebView 的输入框并未绑定 IME 客户端，
+   *      调用必然失败（日志 `ShowTextInputInner,not bound!` / 12800009 client detached），
+   *      只会白刷日志；`showSoftKeyboard()` 则需要系统级权限 CONNECT_IME_ABILITY，更用不了。
+   *   2. **必须防止自我循环**：这里的 `blur()+focus()` 会产生新的焦点事件，
+   *      若再次触发兜底就会「兜底 → 聚焦 → 再兜底」，键盘不停闪现（实机已复现）。
+   *      因此调用方对 retry / refocus 一律忽略，并且整体带冷却。
    */
   private ensureSoftKeyboardForEdit(): void {
     // 给内核一点时间：正常路径下 focus 之后键盘会自己起来，不要抢
@@ -882,57 +908,26 @@ struct Index {
         hilog.info(DOMAIN, TAG, 'Soft keyboard already shown, no fallback needed');
         return;
       }
-      hilog.info(DOMAIN, TAG, 'Soft keyboard missing for inline edit, applying fallback');
-      this.requestImeTextInput();
-      // 第一级若没生效，再走「切模式 + 重新聚焦」
+      hilog.info(DOMAIN, TAG, 'Soft keyboard missing for inline edit, switching mode and refocusing');
+      this.setKeyboardAutoMode(true);
+      try {
+        this.controller.runJavaScript(buildRetryFocusScript())
+          .then((result: string) => {
+            hilog.info(DOMAIN, TAG, 'Retry edit focus: %{public}s', result);
+          })
+          .catch((err: BusinessError) => {
+            hilog.warn(DOMAIN, TAG, 'retry focus failed: %{public}d', err.code);
+          });
+      } catch (err) {
+        hilog.warn(DOMAIN, TAG, 'Failed to retry edit focus');
+      }
+      // 切换窗口尽量短：只要新的 focus 事件已经产生，就可以立刻把防线恢复
       setTimeout(() => {
-        if (this.keyboardHeightVp > 0) {
-          hilog.info(DOMAIN, TAG, 'Keyboard shown by showTextInput');
-          return;
-        }
-        hilog.info(DOMAIN, TAG, 'showTextInput ineffective, switching mode and refocusing');
-        this.setKeyboardAutoMode(true);
-        try {
-          this.controller.runJavaScript(buildRetryFocusScript())
-            .then((result: string) => {
-              hilog.info(DOMAIN, TAG, 'Retry edit focus: %{public}s', result);
-            })
-            .catch((err: BusinessError) => {
-              hilog.warn(DOMAIN, TAG, 'retry focus failed: %{public}d', err.code);
-            });
-        } catch (err) {
-          hilog.warn(DOMAIN, TAG, 'Failed to retry edit focus');
-        }
-        // 恢复防线：无论这次有没有成功，都不能把「点图片不弹键盘」的保护一直关着
-        setTimeout(() => {
-          this.setKeyboardAutoMode(false);
-          hilog.info(DOMAIN, TAG, 'Keyboard fallback done, keyboardHeightVp=%{public}d',
-            this.keyboardHeightVp);
-        }, 900);
-      }, 260);
+        this.setKeyboardAutoMode(false);
+        hilog.info(DOMAIN, TAG, 'Keyboard fallback done, keyboardHeightVp=%{public}d',
+          this.keyboardHeightVp);
+      }, 150);
     }, 350);
-  }
-
-  /**
-   * 请输入法显示文本输入。
-   *
-   * `showTextInput` 不需要系统权限（`showSoftKeyboard` 需要 CONNECT_IME_ABILITY），
-   * 是本应用唯一能直接拉起键盘的官方接口；没有绑定编辑框时会抛 12800003，走下一级兜底。
-   */
-  private requestImeTextInput(): void {
-    try {
-      inputMethod.getController()
-        .showTextInput(inputMethod.RequestKeyboardReason.TOUCH)
-        .then(() => {
-          hilog.info(DOMAIN, TAG, 'showTextInput requested');
-        })
-        .catch((err: BusinessError) => {
-          hilog.warn(DOMAIN, TAG, 'showTextInput failed: code=%{public}d, msg=%{public}s',
-            err.code, err.message);
-        });
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'inputMethod controller unavailable');
-    }
   }
 
   /**
@@ -951,6 +946,34 @@ struct Index {
     }
   }
 
+  /** 上次因切换会话而重载页面的时间戳（冷却用，避免连续切换时反复整页重载） */
+  private lastConvRefreshAt: number = 0;
+
+  /** 页面进入后台的时间戳（判断是否从后台回来） */
+  private pageHiddenAt: number = 0;
+
+  /**
+   * 切到别的会话后重新加载页面，同步服务端最新内容。
+   *
+   * 站点是 SPA：切会话走前端路由、用内存里缓存的会话数据，不会重新向服务端拉取，
+   * 所以在网页端 / 其它设备刚发过消息时，切进来看到的还是旧的。应用侧没有它的数据接口，
+   * 唯一能保证拿到最新内容的手段就是让页面重新加载一次（SPA 启动时会重新拉取）。
+   * 3 秒冷却：连续切换时只重载一次，避免来回闪。
+   */
+  private refreshConversationFromServer(): void {
+    const now: number = Date.now();
+    if (now - this.lastConvRefreshAt < 3000) {
+      hilog.info(DOMAIN, TAG, 'Conversation refresh skipped (cooldown)');
+      return;
+    }
+    this.lastConvRefreshAt = now;
+    hilog.info(DOMAIN, TAG, 'Reloading page to sync conversation from server');
+    try {
+      this.controller.refresh();
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to reload page for conversation sync');
+    }
+  }
   /** 提示「再按一次返回桌面」。时长与确认窗口一致，提示消失即窗口结束 */
   private showBackAgainToast(): void {
     try {
@@ -962,6 +985,13 @@ struct Index {
       hilog.warn(DOMAIN, TAG, 'Failed to show back-again toast');
     }
   }
+
+  // 上次触发「键盘兜底」的时间戳：兜底会 blur+focus 制造新的焦点事件，
+  // 必须有冷却，否则会自我循环、键盘不停闪现（实机已复现）
+  private lastKeyboardFallbackAt: number = 0;
+
+  /** 键盘兜底的冷却时间（毫秒） */
+  private static readonly KEYBOARD_FALLBACK_COOLDOWN_MS: number = 3000;
 
   private startLoadTimeout(): void {
     this.clearLoadTimeout();
