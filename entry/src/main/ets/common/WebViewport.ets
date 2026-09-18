@@ -165,33 +165,29 @@ export const EDITOR_IMAGE_MAX_VH: number = 20;
  * 的上限（`div:has(> textarea) > *`），所以顺序不能调。
  */
 export function buildEditorCardCss(): string {
-  return 'div.' + EDITOR_CARD_CLASS + '{display:flex !important;flex-direction:column !important;' +
-    'max-height:var(' + EDITOR_MAX_VAR + ',' + COMPOSER_FALLBACK_VH + 'vh) !important;' +
-    // 用 auto 而不是 hidden：卡片被限高后内容可能仍然超高（图片 + 多行文本），
-    // hidden 会把最底下的按钮行直接裁掉；auto 让卡片成为**滚动容器**，
-    // 于是下面那条 sticky 的按钮行才有意义 —— 它会钉在卡片可视底边，永远露着。
-    'overflow-y:auto !important;overflow-x:hidden !important;}' +
-    'div.' + EDITOR_CARD_CLASS + ' > *{max-height:none !important;flex:0 0 auto !important;}' +
-    'div.' + EDITOR_CARD_CLASS + ' textarea,div.' + EDITOR_CARD_CLASS +
-    ' [contenteditable="true"]{flex:1 1 auto !important;min-height:0 !important;' +
-    'max-height:none !important;overflow-y:auto !important;}' +
-    // **最关键的一条**：只让 textarea 自己可收缩是不够的 —— 它的包装层
-    // （实测 DIV._646a522）是卡片的直接子元素，被上面那条 `> *{flex:0 0 auto}` 冻住了，
-    // 于是长文本时整列都收不下去，卡片 overflow:hidden 就把底部的按钮行裁掉。
-    // 因此「装着输入框的那一支子元素」必须吸收收缩并自己滚动（结构化 :has 匹配，
-    // 不依赖站点哈希类名）。
-    'div.' + EDITOR_CARD_CLASS + ' > *:has(textarea),div.' + EDITOR_CARD_CLASS +
-    ' > *:has([contenteditable="true"]){flex:1 1 auto !important;min-height:0 !important;' +
-    'max-height:none !important;overflow-y:auto !important;}' +
-    // 按钮行：sticky 贴卡片底部。padding-bottom 兜住卡片自身的底部内边距，
-    // 否则按钮行会有一部分落在卡片 padding 里被 overflow:hidden 裁掉一点边
-    'div.' + EDITOR_ACTION_ROW_CLASS + '{position:sticky !important;bottom:0 !important;' +
-    'flex:0 0 auto !important;z-index:2 !important;' +
-    'padding-bottom:var(' + EDITOR_BOTTOM_PAD_VAR + ',0px) !important;}' +
-    // 卡片里的图片/视频按可视高度限高：图片 + 长文本一起顶高卡片是本次问题的直接成因之一
+  // 只保留两条**真正防裁切**的规则：
+  //   ① 卡片限高 + 超出可滚动：图片 + 长文本不再把卡片顶得超过可视区；
+  //   ② 卡片内图片按可视高度限高：它是「按钮被挤出可视区」的直接成因。
+  //
+  // 早先还加过一整套列向 flex（> * 冻结、:has(textarea) 伸缩、按钮行 sticky），
+  // 结果适得其反：卡片到限高后，被允许伸长的那一支会吃掉剩余空间，在文本框下方
+  // 留出一大片空白（文本框自身已限高并在内部滚动），而且每次插入长文本都会更长。
+  // 现在这些 flex 规则全部撤掉，交回站点自己的布局，只由上面两条兜底。
+  return 'div.' + EDITOR_CARD_CLASS + '{max-height:var(' + EDITOR_MAX_VAR + ',' +
+    COMPOSER_FALLBACK_VH + 'vh) !important;overflow-y:auto !important;overflow-x:hidden !important;}' +
     'div.' + EDITOR_CARD_CLASS + ' img,div.' + EDITOR_CARD_CLASS + ' video{' +
     'max-height:' + EDITOR_IMAGE_MAX_VH + 'vh !important;width:auto !important;' +
-    'object-fit:contain !important;}';
+    'object-fit:contain !important;}' +
+  // 站点用的是「悬浮式滚动条」，只在滚动瞬间显形、停下即淡出，触屏上基本看不到。
+  // 这里**只给编辑卡片**补一根常驻细滚动条（上一版是全局强制，才会波及其它弹层、
+  // 甚至出现两根条）；主对话框不动 —— 它自带的那根本来就正常。
+  'div.' + EDITOR_CARD_CLASS + '{scrollbar-width:thin !important;' +
+  'scrollbar-color:rgba(0,0,0,0.30) transparent !important;}' +
+  'div.' + EDITOR_CARD_CLASS + '::-webkit-scrollbar{width:8px !important;}' +
+  'div.' + EDITOR_CARD_CLASS + '::-webkit-scrollbar-thumb{' +
+  'background-color:rgba(0,0,0,0.28) !important;border-radius:4px !important;' +
+  'min-height:32px !important;}' +
+  'div.' + EDITOR_CARD_CLASS + '::-webkit-scrollbar-track{background-color:transparent !important;}';
 }
 
 /**
@@ -639,6 +635,20 @@ export function buildComposerAutoHideScript(): string {
             window.__dsHiddenCard = null;
           }
           var keyboardUp = !!window.__dsKeyboardUp;
+          // 键盘收起时复位「本次编辑已滚动过」标记：下次再弹起仍会滚一次，
+          // 而收起过程中的 resize 不会再动滚动位置
+          if (!keyboardUp) { window.__dsEditScrolled = false; }
+
+
+
+          // 主对话框点「发送」后收起软键盘：实测手机端键盘不自动收起（平板端会）。
+          // 发送动作本身已完成，这里只是主动 blur 掉焦点，让两端行为一致。
+          // 监听只装一次（apply 会被频繁调用）。
+          // 注意：这里**不要**再挂「发送后主动 blur」那套监听。
+          // 实测它会把两端的原生行为都弄坏：平板端原本点发送会自动收起键盘，
+          // 加上 click/pointerup/touchend 捕获监听 + 延迟 blur 之后反而收不起了
+          // （推测是拦截了站点自己的失焦/收起流程）。键盘的显示与收起交回内核与站点：
+          // 「点图片不弹键盘」仍由 setSoftKeyboardBehaviorMode(DISABLE_AUTO_KEYBOARD_ON_ACTIVE) 保证。
           // 内联编辑态：焦点在可编辑元素上，且它不在底部固定容器里
           var inlineEdit = keyboardUp && aeEditable && !isInBottomCard(ae);
           if (inlineEdit) {
@@ -686,8 +696,15 @@ export function buildComposerAutoHideScript(): string {
                 window.__dsActionRow = row;
               }
               // 卡片贴底对齐滚动：文本域在上面、按钮行在下面，
-              // block:'end' 能保证按钮行落在可视区内（居中反而可能把按钮推到键盘后面）
-              try { editCard.scrollIntoView({ block: 'end' }); } catch (e4) { }
+              // block:'end' 能保证按钮行落在可视区内（居中反而可能把按钮推到键盘后面）。
+              //
+              // **只在键盘弹起时滚一次**：apply 会被 resize 触发，而收起键盘同样触发 resize，
+              // 若每次都滚，收起键盘时编辑框会被强行拉到最底部 —— 实机现象正是
+              // 「历史对话内容足够多时，一收键盘对话框自动坍塌到底部」。
+              if (keyboardUp && !window.__dsEditScrolled) {
+                window.__dsEditScrolled = true;
+                try { editCard.scrollIntoView({ block: 'end' }); } catch (e4) { }
+              }
           } else if (window.__dsEditCard) {
             window.__dsEditCard.classList.remove('${EDITOR_CARD_CLASS}');
             window.__dsEditCard = null;
@@ -824,27 +841,12 @@ export function buildComposerAutoHideScript(): string {
         } catch (eOb) { }
       }
 
-      // 点卡片空白处也能聚焦到编辑框：编辑卡片里除了文本域还有留白，
-      // 用户点上去本该开始编辑，但站点没把点击转发给文本域，于是「点了没反应」。
-      // 只在焦点落在非交互元素上时补一次 focus（用户的手指就是 user activation，
-      // 因此这一路能把软键盘正常拉起）。
-      document.addEventListener('pointerdown', function (ev) {
-        try {
-          var ec = window.__dsEditCard;
-          if (!ec || !ec.contains(ev.target)) { return; }
-          var t = ev.target;
-          if (t.matches && t.matches('${EDITABLE_SELECTOR}')) { return; }
-          if (t.closest && t.closest('button,[role="button"],a,input,textarea,select,[contenteditable="true"],img,video')) { return; }
-          var ta = ec.querySelector('${EDITABLE_SELECTOR}');
-          if (!ta) { return; }
-          setTimeout(function () {
-            try {
-              if (document.activeElement !== ta) { ta.focus(); }
-              reportFocus('card-tap');
-            } catch (e7) { }
-          }, 0);
-        } catch (e8) { }
-      }, true);
+      // 注意：这里**不能**再挂「指针按下」事件去补聚焦（即 addEventListener 的 down 事件）。
+      // 实测它会在「指针按下」与 click 之间改变布局，导致三件事：
+      //   ① 收起态点击卡片空白处时对话框坍塌收缩；
+      //   ② 按钮周围出现一圈 focus 高亮边框；
+      //   ③ 第一次点击落空，必须再点一次按钮才生效。
+      // 站点自己的点击→聚焦逻辑本来就能唤起键盘（期望 6 要保留的正是它），所以整段移除。
 
       // 供应用侧调用：重新聚焦当前编辑元素（配合 setSoftKeyboardBehaviorMode 兜底拉键盘）
       window.__dsRetryEditFocus = function () {

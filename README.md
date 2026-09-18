@@ -43,6 +43,13 @@
 
 > 各功能的实现细节（返回手势判定、软键盘与编辑卡片处理、窗口形态适配等）见 git 提交记录，README 不再展开。
 
+## Deep Link
+
+支持从其他 App / 短信 / 扫码打开 `https://chat.deepseek.com/share/...` 分享链接。
+
+> 在浏览器中点击同域链接**不会**唤醒应用：`chat.deepseek.com` 非自有域名，
+> 无法托管 AGC 的域名校验文件。
+
 ## 项目结构
 
 ```
@@ -70,9 +77,17 @@ entry/src/main/ets/
 └── pages/Index.ets                  WebView 主页面
 ```
 
+## 构建
+
+| 要求 | 版本 |
+|------|------|
+| DevEco Studio | 6.0+ |
+| HarmonyOS SDK | API 23+ |
+| 权限 | `ohos.permission.INTERNET`、`ohos.permission.GET_NETWORK_INFO` |
+
 ## 版本
 
-`dev.cyotatsu.deepseek.oh` — v1.1.4.4 (1001044)
+`dev.cyotatsu.deepseek.oh` — v1.1.4.5 (1001045)
 
 `versionCode` 编码规则：`主版本×1000000 + 次版本×10000 + 修订×10 + 构建`。
 发版只需改 `AppScope/app.json5` 的 `versionName` 与 `versionCode`

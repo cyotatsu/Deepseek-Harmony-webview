@@ -365,10 +365,11 @@ export default function webViewportTest() {
     });
 
     // 点卡片空白处也要能开始编辑（用户的手指天然带 user activation，键盘能正常拉起）
-    it('focuses_the_editor_when_tapping_card_blank_area', 0, () => {
-      expect(script).assertContain('pointerdown');
-      expect(script).assertContain('card-tap');
-      expect(script).assertContain('closest');
+    // 收起态点击卡片不再坍塌、也不再需要点两次：脚本不再挂 pointerdown 去补聚焦
+    // （它会在 pointerdown 与 click 之间改变布局）。这条锁住「不挂 pointerdown」这个决定。
+    it('does_not_hook_pointerdown_to_force_focus', 0, () => {
+      expect(script).assertContain('__dsEditScrolled');
+      expect(script.indexOf('pointerdown')).assertEqual(-1);
     });
 
     it('exposes_a_retry_hook_for_the_app_side', 0, () => {

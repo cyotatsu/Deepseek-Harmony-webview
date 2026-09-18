@@ -642,11 +642,6 @@ struct Index {
     this.refreshPage();
   }
 
-  /** 页面隐藏（含切到后台）：记住时间点 */
-  onPageHide(): void {
-    this.pageHiddenAt = Date.now();
-  }
-
   onPageShow(): void {
     if (this.deepLinkUrl && this.deepLinkUrl !== '') {
       this.navigateToUrl(this.deepLinkUrl);
@@ -657,15 +652,6 @@ struct Index {
     // 就会重新取样，因此在真机上「输入一段长文本 → 切后台再切回 → 看日志」
     // 就能拿到输入框此时的实际高度与样式，不必接调试器。
     this.probeViewport();
-    // 从后台回到前台：重载页面同步服务端最新内容。
-    // 站内切会话、弹面板不会走到这里，因此日常使用不会闪；
-    // 「去别的设备 / 网页发完消息再回来」正是这条路径。
-    if (this.pageHiddenAt > 0 && Date.now() - this.pageHiddenAt > 5000) {
-      hilog.info(DOMAIN, TAG, 'Returned to foreground after %{public}d ms',
-        Date.now() - this.pageHiddenAt);
-      this.refreshConversationFromServer();
-    }
-    this.pageHiddenAt = 0;
   }
 
   // 响应热启动时 onNewWant 设置的 deepLinkUrl 变化（onPageShow 仅在冷/温启动触发）
@@ -946,34 +932,6 @@ struct Index {
     }
   }
 
-  /** 上次因切换会话而重载页面的时间戳（冷却用，避免连续切换时反复整页重载） */
-  private lastConvRefreshAt: number = 0;
-
-  /** 页面进入后台的时间戳（判断是否从后台回来） */
-  private pageHiddenAt: number = 0;
-
-  /**
-   * 切到别的会话后重新加载页面，同步服务端最新内容。
-   *
-   * 站点是 SPA：切会话走前端路由、用内存里缓存的会话数据，不会重新向服务端拉取，
-   * 所以在网页端 / 其它设备刚发过消息时，切进来看到的还是旧的。应用侧没有它的数据接口，
-   * 唯一能保证拿到最新内容的手段就是让页面重新加载一次（SPA 启动时会重新拉取）。
-   * 3 秒冷却：连续切换时只重载一次，避免来回闪。
-   */
-  private refreshConversationFromServer(): void {
-    const now: number = Date.now();
-    if (now - this.lastConvRefreshAt < 3000) {
-      hilog.info(DOMAIN, TAG, 'Conversation refresh skipped (cooldown)');
-      return;
-    }
-    this.lastConvRefreshAt = now;
-    hilog.info(DOMAIN, TAG, 'Reloading page to sync conversation from server');
-    try {
-      this.controller.refresh();
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'Failed to reload page for conversation sync');
-    }
-  }
   /** 提示「再按一次返回桌面」。时长与确认窗口一致，提示消失即窗口结束 */
   private showBackAgainToast(): void {
     try {
