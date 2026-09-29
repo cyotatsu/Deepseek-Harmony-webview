@@ -22,7 +22,7 @@
     },
     {
       "name": "accent",
-      "value": "#4A90D9"
+      "value": "#4D6BFE"
     },
     {
       "name": "surface_card",
@@ -43,6 +43,10 @@
     {
       "name": "floating_button_bg",
       "value": "#E6FFFFFF"
+    },
+    {
+      "name": "floating_button_border",
+      "value": "#14000000"
     },
     {
       "name": "floating_button_shadow",
@@ -67,6 +71,22 @@
     {
       "name": "floating_button_bg_active",
       "value": "#F2E8F0FA"
+    },
+    {
+      "name": "floating_button_icon",
+      "value": "#4D6BFE"
+    },
+    {
+      "name": "preview_action_bg",
+      "value": "#CC1A1A1C"
+    },
+    {
+      "name": "preview_action_icon",
+      "value": "#FFFFFFFF"
+    },
+    {
+      "name": "preview_backdrop",
+      "value": "#E6000000"
     }
   ]
 }

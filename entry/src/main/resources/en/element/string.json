@@ -13,6 +13,10 @@
       "value": "Refresh page"
     },
     {
+      "name": "a11y_more_actions",
+      "value": "More actions"
+    },
+    {
       "name": "common_close",
       "value": "Close"
     },
@@ -117,14 +121,6 @@
       "value": "Settings"
     },
     {
-      "name": "settings_refresh_button",
-      "value": "Refresh button"
-    },
-    {
-      "name": "settings_refresh_button_desc",
-      "value": "Show the one-tap refresh button"
-    },
-    {
       "name": "settings_clear_cache",
       "value": "Clear app cache"
     },
@@ -195,6 +191,46 @@
     {
       "name": "refresh_confirm_ok",
       "value": "Refresh anyway"
+    },
+    {
+      "name": "settings_section_fab",
+      "value": "Floating button"
+    },
+    {
+      "name": "settings_section_misc",
+      "value": "Other"
+    },
+    {
+      "name": "settings_reset_fab",
+      "value": "Reset button position"
+    },
+    {
+      "name": "settings_reset_fab_desc",
+      "value": "Move the button back to the top-right corner"
+    },
+    {
+      "name": "settings_auto_snap",
+      "value": "Auto snap when idle"
+    },
+    {
+      "name": "settings_auto_snap_desc",
+      "value": "Snap to the edge after resting near it"
+    },
+    {
+      "name": "settings_hide_on_snap",
+      "value": "Partially hide at edge"
+    },
+    {
+      "name": "settings_hide_on_snap_desc",
+      "value": "Turn off to keep the button fully visible at the edge"
+    },
+    {
+      "name": "toast_fab_reset",
+      "value": "Floating button reset to default position"
+    },
+    {
+      "name": "toast_save_fail",
+      "value": "Save failed, please try again"
     }
   ]
 }

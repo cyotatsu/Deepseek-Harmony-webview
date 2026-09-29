@@ -13,6 +13,10 @@
       "value": "Обновить страницу"
     },
     {
+      "name": "a11y_more_actions",
+      "value": "Дополнительные действия"
+    },
+    {
       "name": "common_close",
       "value": "Закрыть"
     },
@@ -117,14 +121,6 @@
       "value": "Настройки"
     },
     {
-      "name": "settings_refresh_button",
-      "value": "Кнопка обновления"
-    },
-    {
-      "name": "settings_refresh_button_desc",
-      "value": "Показывать кнопку обновления"
-    },
-    {
       "name": "settings_clear_cache",
       "value": "Очистить кеш приложения"
     },
@@ -195,6 +191,46 @@
     {
       "name": "refresh_confirm_ok",
       "value": "Всё равно обновить"
+    },
+    {
+      "name": "settings_section_fab",
+      "value": "Плавающая кнопка"
+    },
+    {
+      "name": "settings_section_misc",
+      "value": "Прочее"
+    },
+    {
+      "name": "settings_reset_fab",
+      "value": "Сбросить положение кнопки"
+    },
+    {
+      "name": "settings_reset_fab_desc",
+      "value": "Вернуть кнопку в правый верхний угол"
+    },
+    {
+      "name": "settings_auto_snap",
+      "value": "Автоприлипание при простое"
+    },
+    {
+      "name": "settings_auto_snap_desc",
+      "value": "Прилипает к краю после паузы рядом с ним"
+    },
+    {
+      "name": "settings_hide_on_snap",
+      "value": "Частично скрывать у края"
+    },
+    {
+      "name": "settings_hide_on_snap_desc",
+      "value": "Выключите, чтобы кнопка у края была видна полностью"
+    },
+    {
+      "name": "toast_fab_reset",
+      "value": "Кнопка возвращена в исходное положение"
+    },
+    {
+      "name": "toast_save_fail",
+      "value": "Не удалось сохранить, попробуйте снова"
     }
   ]
 }

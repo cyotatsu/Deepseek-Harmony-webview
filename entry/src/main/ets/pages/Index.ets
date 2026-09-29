@@ -7,6 +7,7 @@ import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { resourceManager, i18n } from '@kit.LocalizationKit';
 import { connection } from '@kit.NetworkKit';
+import { util } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window, promptAction } from '@kit.ArkUI';
 import { camera, cameraPicker } from '@kit.CameraKit';
@@ -21,21 +22,25 @@ import { sanitizeFileName, buildDownloadTempPath, fileNameFromTempPath,
   ensureDownloadTempDir, removeDownloadTempFile } from '../common/DownloadFiles';
 import { ensurePermission, MICROPHONE_PERMISSION } from '../common/AppPermissions';
 import { buildUserAgent, buildViewportFixScript, buildResizeNotifyScript,
-  buildProbeScript, buildOverlayProbeScript, buildOverlayDismissScript, parseOverlayKind,
+  buildProbeScript, buildOverlayProbeScript, buildOverlayDismissScript, buildOverlayCloseScript,
+  parseOverlayKind, OVERLAY_PREVIEW, OVERLAY_CONFIRM,
   isDismissClicked, buildComposerAutoHideScript, buildKeyboardStateScript, buildRetryFocusScript,
   VIEWPORT_RESIZE_DEBOUNCE_MS } from '../common/WebViewport';
 import { buildFocusGuardScript, ENABLE_IMAGE_TAP_FOCUS_GUARD } from '../common/WebInputGuard';
 import { decideBackAction, BackContext, EXIT_CONFIRM_WINDOW_MS,
   BACK_ACTION_DISMISS_MODAL, BACK_ACTION_DISMISS_OVERLAY, BACK_ACTION_WEB_BACK,
-  BACK_ACTION_PROMPT_EXIT } from '../common/BackPolicy';
+  BACK_ACTION_DISMISS_PREVIEW, BACK_ACTION_DISMISS_CONFIRM,
+  BACK_ACTION_PROMPT_EXIT, decideOverlayDismissFallback } from '../common/BackPolicy';
 import { PageProgress } from '../components/PageProgress';
 import { ErrorView } from '../components/ErrorView';
 import { RefreshConfirmDialog } from '../components/RefreshConfirmDialog';
 import { FloatingBar } from '../components/FloatingBar';
 import { SettingsSheet } from '../components/SettingsSheet';
 import { UploadSheet } from '../components/UploadSheet';
-import { isRefreshButtonEnabled, setRefreshButtonEnabled,
-  isRefreshConfirmSkipped, setRefreshConfirmSkipped } from '../common/UiPrefs';
+import { isRefreshConfirmSkipped, setRefreshConfirmSkipped,
+  isFloatingHideOnSnap, setFloatingHideOnSnap,
+  isFloatingAutoSnap, setFloatingAutoSnap } from '../common/UiPrefs';
+import { KEY_FAB_HIDE_ON_SNAP, KEY_FAB_AUTO_SNAP, KEY_FAB_RESET_POS } from '../common/AppConfig';
 
 const DOMAIN = 0x0001;
 const TAG = 'DeepSeekIndex';
@@ -117,8 +122,6 @@ struct Index {
   @State pageH: number = 0;
   // 设置面板开关
   @State showSettings: boolean = false;
-  // 右下角刷新按钮是否启用（设置面板里的开关，持久化）
-  @State refreshButtonEnabled: boolean = true;
   // 用户已勾选「不再显示」刷新确认弹窗（持久化）
   @State refreshSkipConfirm: boolean = false;
   // 本次弹窗里「不再显示」的勾选状态（每次弹出前重置，@Link 绑定给弹窗组件）
@@ -154,6 +157,10 @@ struct Index {
       hilog.warn(DOMAIN, TAG, 'Failed to register netAvailable listener');
     }
   }
+
+
+
+
 
   aboutToDisappear(): void {
     // 组件销毁前清理定时器，避免内存泄漏和无效回调
@@ -588,15 +595,38 @@ struct Index {
           pageW: this.pageW,
           pageH: this.pageH,
           keyboardHeightVp: this.keyboardHeightVp,
-          refreshEnabled: this.refreshButtonEnabled,
+          // 同窗口渲染，窗口原点为 0（独立窗口方案才需要非 0）
+          winX: 0,
+          winY: 0,
+          // 刷新按钮常显：设置面板里那个开关已移除（见 SettingsSheet 说明）
+          refreshEnabled: true,
           onRefresh: () => this.onFloatingRefresh(),
           onOpenSettings: () => {
             this.showSettings = true;
+          },
+          // 组件把「收起」能力交回来：点网页空白处时用它折叠展开的子菜单
+          onReady: (collapse: () => void) => {
+            this.collapseFloatingBar = collapse;
+          },
+          // 拖动期间压制键盘：拖动时手指会滑出按钮落到网页输入框上，
+          // 网页一聚焦就会弹软键盘。处理放在页面侧，且不改动视图结构
+          //（拖动中增删节点会打断手势，实机已验证）。
+          onDragStateChange: (dragging: boolean) => {
+            this.setFloatingDragActive(dragging);
           }
         })
+
       }
       .width('100%')
       .layoutWeight(1)
+      // 点击网页区域时收起悬浮子菜单：Web 组件自己不消费点击（滑动、点按都交给网页），
+      // 事件会冒泡到本容器；而悬浮按钮自身用 HitTestMode.Block 吃掉落在它身上的事件，
+      // 因此「点按钮」不会走到这里，「点网页空白」才会触发收起。
+      .onClick(() => {
+        if (this.collapseFloatingBar) {
+          this.collapseFloatingBar();
+        }
+      })
       // 把实际可用的坐标空间交给悬浮操作条：它才是靠 100% 定位的一方，
       // 需要用这两个值把按钮限制在窗口内并计算键盘避让。
       // 非全屏（悬浮窗/自由多窗）时这里就是应用窗口的尺寸。
@@ -679,6 +709,8 @@ struct Index {
    * 由 {@link dispatchBackDecision} 在几十毫秒内完成决策并执行对应动作；
    * 代价是「退出到桌面」不能靠 `return false`，必须自己调 terminateSelf()。
    */
+
+
   onBackPress(): boolean {
     // 全部交给异步决策（见 dispatchBackDecision）：应用自己的弹层同样由
     // BackPolicy 的 dismiss-modal 分支处理，保证判定只有一处实现。
@@ -698,6 +730,7 @@ struct Index {
    *     继续走决策 —— 返回键是主导航手段，绝不能因为一次异步失败而失灵；
    *   · **去重**：一次决策未完成前的重复按下直接忽略，避免连击触发两次动作。
    */
+
   private dispatchBackDecision(): void {
     if (this.backDecisionPending) {
       return;
@@ -772,6 +805,13 @@ struct Index {
       return;
     }
 
+    // 预览态：只能用"预览专用"的关闭脚本（避开图片本体，绝不 backward / 退出）
+    if (action === BACK_ACTION_DISMISS_PREVIEW || action === BACK_ACTION_DISMISS_CONFIRM) {
+      const kind: string = action === BACK_ACTION_DISMISS_PREVIEW ? OVERLAY_PREVIEW : OVERLAY_CONFIRM;
+      this.dismissWebOverlayWith(kind);
+      return;
+    }
+
     if (action === BACK_ACTION_WEB_BACK) {
       try {
         this.controller.backward();
@@ -802,14 +842,43 @@ struct Index {
    * 关闭入口、又盖满屏幕点不到外面，DOM 点不掉，后退才是它自己的关闭动作。
    */
   private dismissWebOverlay(): void {
+    this.dismissWebOverlayWith('');
+  }
+
+
+
+  /** 统一小提示，避免到处写 showToast */
+  private toast(message: Resource): void {
+    this.getUIContext().getPromptAction().showToast({ message: message, duration: 2000 });
+  }
+
+  /**
+   * 关闭网页瞬时界面。
+   *
+   * @param kind 空串 = 菜单 / 多选模式（用既有脚本）；
+   *             否则用**预览 / 确认专用**脚本 —— 两者关闭策略不同：
+   *             必须点遮罩空白或它自己的取消入口，且要避开图片本体。
+   */
+  private dismissWebOverlayWith(kind: string): void {
+    const script: string = kind === '' ? buildOverlayDismissScript() : buildOverlayCloseScript(kind);
     try {
-      this.controller.runJavaScript(buildOverlayDismissScript())
+      this.controller.runJavaScript(script)
         .then((result: string) => {
           hilog.info(DOMAIN, TAG, 'Web overlay dismissed: %{public}s', result);
           // 用 isDismissClicked 解析：runJavaScript 的字符串返回值带引号，
           // 直接拿原文判断会把「点到了」误判成「没点到」
-          if (!isDismissClicked(result)) {
-            hilog.warn(DOMAIN, TAG, 'No dismiss target found for the web overlay');
+          if (kind === '') {
+            if (!isDismissClicked(result)) {
+              // ⚠️ 必须降级，不能就此结束：onBackPress 已经把返回键消费掉了，
+              // 若这里什么都不做，用户感知就是「返回失灵」（什么都点掉了但界面没变）。
+              // 典型成因：判成 closable 的"取消/关闭"文字按钮并不在任何浮层容器内，
+              // 关闭脚本找不到宿主会返回 no-host。
+              hilog.warn(DOMAIN, TAG,
+                'No dismiss target found, falling back: %{public}s', String(result));
+              this.fallbackAfterOverlayMiss();
+            }
+          } else {
+            hilog.info(DOMAIN, TAG, 'Close overlay(%{public}s) -> %{public}s', kind, result);
           }
         })
         .catch((err: BusinessError) => {
@@ -818,6 +887,43 @@ struct Index {
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'Failed to dismiss web overlay');
     }
+  }
+
+  /**
+   * 「点掉网页瞬时界面」失败后的降级：
+   *   · 网页还有历史 ⇒ 网页后退（至少让用户能退，而不是原地不动）；
+   *   · 没有历史 ⇒ 走「再按一次退出」的确认。
+   *
+   * 判定逻辑在 common/BackPolicy.decideOverlayDismissFallback（纯函数，有单测）。
+   */
+  private fallbackAfterOverlayMiss(): void {
+    let canGoBack: boolean = false;
+    try {
+      canGoBack = this.controllerReady ? this.controller.accessBackward() : false;
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'fallback: read back state failed');
+    }
+    const ms: number = this.lastExitPromptAt > 0 ? (Date.now() - this.lastExitPromptAt) : -1;
+    const action: string = decideOverlayDismissFallback(canGoBack, ms);
+    hilog.info(DOMAIN, TAG, 'Overlay-dismiss fallback action: %{public}s', action);
+
+    if (action === BACK_ACTION_WEB_BACK) {
+      try {
+        this.controller.backward();
+        this.updateBackButtonState();
+      } catch (err) {
+        hilog.error(DOMAIN, TAG, 'fallback backward failed');
+      }
+      return;
+    }
+    if (action === BACK_ACTION_PROMPT_EXIT) {
+      this.lastExitPromptAt = Date.now();
+      this.showBackAgainToast();
+      return;
+    }
+    this.lastExitPromptAt = 0;
+    this.showBackButton = false;
+    this.exitToDesktop();
   }
 
   /** 退出到桌面。事件已被 onBackPress 消费，所以只能主动结束本 Ability */
@@ -950,6 +1056,73 @@ struct Index {
 
   /** 键盘兜底的冷却时间（毫秒） */
   private static readonly KEYBOARD_FALLBACK_COOLDOWN_MS: number = 3000;
+
+  /** 悬浮条是否正在被拖动（拖动期间压制软键盘，见 setFloatingDragActive） */
+  private floatingDragActive: boolean = false;
+
+  // ── 悬浮条设置（页面读写 AppStorage，设置面板与悬浮条各自消费）──
+  /** 贴边半隐藏 */
+  @StorageLink(KEY_FAB_HIDE_ON_SNAP) fabHideOnSnap: boolean = true;
+  /** 空闲自动吸附 */
+  @StorageLink(KEY_FAB_AUTO_SNAP) fabAutoSnap: boolean = true;
+  /** 重置位置请求（写 true 触发悬浮条复位） */
+  @StorageLink(KEY_FAB_RESET_POS) fabResetPos: boolean = false;
+
+  /**
+   * 悬浮条交给页面的「收起子菜单」回调（见 FloatingBar 的 onReady）。
+   * 由组件在 aboutToAppear 注入，页面只保存引用。
+   */
+  private collapseFloatingBar: (() => void) | null = null;
+
+  /**
+   * 悬浮按钮拖动开始/结束时调用：拖动期间压制软键盘。
+   *
+   * 为什么需要：拖动时手指会滑出按钮、落到网页上，网页一旦聚焦输入框就会弹出软键盘
+   *（实机现象「拖动时有时会误触发键盘」），键盘弹出还会把布局顶起来、打断拖动。
+   *
+   * 为什么在这里而不是在组件里：组件侧唯一的做法是铺一层全屏捕获层，但那需要在拖动中
+   * 插入/移除节点，**会打断正在进行的手势**（实测表现为拖动断续、跳变），因此放弃。
+   * 改由页面用内核级开关压制，全程不改动视图结构。
+   */
+  /** 重置悬浮条位置：写请求键，悬浮条的 @Watch 会复位到默认位置 */
+  private resetFabPosition(): void {
+    this.fabResetPos = true;
+    this.getUIContext().getPromptAction().showToast({
+      message: $r('app.string.toast_fab_reset')
+    });
+  }
+
+
+
+  private setHideOnSnap(enabled: boolean): void {
+    this.fabHideOnSnap = enabled;
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      setFloatingHideOnSnap(ctx, enabled);
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to persist floating hide-on-snap flag');
+    }
+  }
+
+  private setAutoSnap(enabled: boolean): void {
+    this.fabAutoSnap = enabled;
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      setFloatingAutoSnap(ctx, enabled);
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to persist floating auto-snap flag');
+    }
+  }
+
+  private setFloatingDragActive(dragging: boolean): void {
+    if (this.floatingDragActive === dragging) {
+      return;
+    }
+    this.floatingDragActive = dragging;
+    this.setKeyboardAutoMode(!dragging);
+    hilog.info(DOMAIN, TAG, 'Floating drag active=%{public}s, keyboard auto mode=%{public}s',
+      String(dragging), String(!dragging));
+  }
 
   private startLoadTimeout(): void {
     this.clearLoadTimeout();
@@ -1527,8 +1700,10 @@ struct Index {
   private restoreUiPrefs(): void {
     try {
       const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      this.refreshButtonEnabled = isRefreshButtonEnabled(ctx);
       this.refreshSkipConfirm = isRefreshConfirmSkipped(ctx);
+      // 悬浮条设置：读入 AppStorage，供设置面板与悬浮条消费
+      this.fabHideOnSnap = isFloatingHideOnSnap(ctx);
+      this.fabAutoSnap = isFloatingAutoSnap(ctx);
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'Failed to restore UI prefs');
     }
@@ -1630,8 +1805,11 @@ struct Index {
   @Builder
   settingsSheet() {
     SettingsSheet({
-      refreshButtonEnabled: this.refreshButtonEnabled,
-      onToggleRefresh: (enabled: boolean) => this.onToggleRefreshButton(enabled),
+      hideOnSnap: this.fabHideOnSnap,
+      autoSnap: this.fabAutoSnap,
+      onResetFabPosition: () => this.resetFabPosition(),
+      onToggleHideOnSnap: (enabled: boolean) => this.setHideOnSnap(enabled),
+      onToggleAutoSnap: (enabled: boolean) => this.setAutoSnap(enabled),
       onClearCache: () => this.clearAppCache(),
       onOpenFeedback: () => this.openInSystemBrowser(FEEDBACK_URL),
       onClose: () => {
@@ -1640,17 +1818,6 @@ struct Index {
     })
   }
 
-  // 设置面板：刷新按钮开关，立即生效并持久化
-  private onToggleRefreshButton(enabled: boolean): void {
-    this.refreshButtonEnabled = enabled;
-    try {
-      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      setRefreshButtonEnabled(ctx, enabled);
-      hilog.info(DOMAIN, TAG, 'Refresh button enabled: %{public}s', String(enabled));
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'Failed to persist refresh button enabled flag');
-    }
-  }
 
   /**
    * 设置面板：清理应用缓存。

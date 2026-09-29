@@ -43,13 +43,6 @@
 
 > 各功能的实现细节（返回手势判定、软键盘与编辑卡片处理、窗口形态适配等）见 git 提交记录，README 不再展开。
 
-## Deep Link
-
-支持从其他 App / 短信 / 扫码打开 `https://chat.deepseek.com/share/...` 分享链接。
-
-> 在浏览器中点击同域链接**不会**唤醒应用：`chat.deepseek.com` 非自有域名，
-> 无法托管 AGC 的域名校验文件。
-
 ## 项目结构
 
 ```
@@ -87,7 +80,7 @@ entry/src/main/ets/
 
 ## 版本
 
-`dev.cyotatsu.deepseek.oh` — v1.1.4.5 (1001045)
+`dev.cyotatsu.deepseek.oh` — v1.1.5 (1001050)
 
 `versionCode` 编码规则：`主版本×1000000 + 次版本×10000 + 修订×10 + 构建`。
 发版只需改 `AppScope/app.json5` 的 `versionName` 与 `versionCode`
@@ -100,3 +93,9 @@ entry/src/main/ets/
 原项目版权：Copyright (c) 2026 Sakura Neko
 
 原项目的版权声明与许可条款已完整保留。在此基础上新增的修改同样以 MIT 许可发布。
+
+---
+
+## 开发说明
+
+本项目在开发过程中使用了 **DeepSeek Harness** 辅助完成部分代码与文档工作。

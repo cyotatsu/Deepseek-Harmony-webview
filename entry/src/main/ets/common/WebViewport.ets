@@ -145,39 +145,51 @@ export const EDITOR_IMAGE_MAX_VH: number = 20;
  * 解决的是**问题一**：历史记录含图片 + 编辑长文本时，卡片的「取消 / 确认」按钮
  * 被挤出可视区。三层约束缺一不可：
  *
- *  1. **卡片硬限高 + 列向 flex**：上限由 `{@link EDITOR_MAX_VAR}` 给出（按实时可视
- *     高度算出的像素值），`overflow:hidden` 保证卡片永远不会高于上限。这样卡片
- *     「总高 ≤ 62% 可视高度」，按钮行必然在卡片内部。
- *  2. **文本域是唯一的伸缩项**：`flex:1 1 auto; min-height:0` —— `min-height:0` 是关键，
- *     否则 flex 项的默认 `min-height:auto` 会让长文本把文本域顶到内容高度，
- *     卡片再被顶高（限高就形同虚设）。文本域内部的滚动条吸收超长内容。
- *  3. **按钮行贴底置顶**：按钮行的直接父元素被脚本标成 {@link EDITOR_ACTION_ROW_CLASS}
- *     （见 buildComposerAutoHideScript），这里给它 `position:sticky; bottom:0`。
- *     既然卡片是 `overflow:hidden`，卡片本身不滚动，"贴底"就等价于**固定在卡片底部** ——
- *     即使站点的按钮行在卡片内不在最后一位、或后面还有别的节点，按钮也不会被卷走。
+ *  1. **卡片硬限高**：上限由 `{@link EDITOR_MAX_VAR}` 给出（按实时可视高度算出的
+ *     像素值）——卡片「总高 ≤ 62% 可视高度」，按钮行必然在卡片内部；
+ *     `overflow-y:auto` 让超高内容由**卡片自己滚动**吸收，而不是把它顶出可视区。
+ *  2. **图片按可视高度限高**：图片是「图片 + 长文本」组合里最不可压缩的一项，
+ *     不限高的话它自己就能吃掉大半个可视区。
+ *  3. **按钮行 sticky 贴底**：按钮行的直接父元素被脚本标成
+ *     {@link EDITOR_ACTION_ROW_CLASS}（见 buildComposerAutoHideScript），
+ *     这里给它 `position:sticky; bottom:0` —— 卡片内部滚动时按钮钉在可视底边，
+ *     即使站点把按钮行放在卡片中间、后面还有别的节点也不会被卷走。
  *
- * 为什么按钮行不加 `order:999`：靠 CSS `order` 把按钮强行拖到卡片末尾会改变站点
- * 自己的信息层级，且一旦按钮不在卡片直接子级就完全失效。sticky 是"就地固定"，
- * 不改变文档流顺序，对站点布局的侵入最小。
+ * 为什么按钮行不用 `order:999` 拖到卡片末尾：那会改变站点自己的信息层级，
+ * 且一旦按钮不在卡片直接子级就完全失效。sticky 是"就地固定"，不改文档流顺序，
+ * 对站点布局的侵入最小 —— 关键的是它**不需要卡片变成 flex 容器**，
+ * 因此不会重蹈「长文本下文本框末尾留大片空白」的覆辙（详见函数内注释）。
  *
  * 选择器一律带 `div.` 前缀并写在既有规则之后：站点自己的类名（哈希类）特异性与
  * `div.自定义类` 相同，靠"后写"取胜；而这条又必须盖过上面那条「卡片直接子元素」
  * 的上限（`div:has(> textarea) > *`），所以顺序不能调。
  */
 export function buildEditorCardCss(): string {
-  // 只保留两条**真正防裁切**的规则：
+  // 三条**真正防裁切**的规则，各管一件事：
   //   ① 卡片限高 + 超出可滚动：图片 + 长文本不再把卡片顶得超过可视区；
-  //   ② 卡片内图片按可视高度限高：它是「按钮被挤出可视区」的直接成因。
+  //   ② 卡片内图片按可视高度限高：它是「按钮被挤出可视区」的直接成因；
+  //   ③ 按钮行 sticky 贴底：卡片被限高后内部可以滚动，站点若把按钮行放在
+  //      卡片中间（后面还有提示文案 / 占位节点），滚动时按钮会被卷出可视区 ——
+  //      sticky 把它钉在卡片可视底边，**无论站点怎么排卡片内部**按钮都露着。
   //
-  // 早先还加过一整套列向 flex（> * 冻结、:has(textarea) 伸缩、按钮行 sticky），
-  // 结果适得其反：卡片到限高后，被允许伸长的那一支会吃掉剩余空间，在文本框下方
-  // 留出一大片空白（文本框自身已限高并在内部滚动），而且每次插入长文本都会更长。
-  // 现在这些 flex 规则全部撤掉，交回站点自己的布局，只由上面两条兜底。
+  // ⚠️ 早先这一整套里还包含列向 flex（`display:flex` + `> *{flex:0 0 auto}` +
+  // `:has(textarea){flex:1 1 auto}`），结果是「插入长文本后文本框下方留一大片空白」：
+  // 卡片到限高后，被允许伸长的那一支吃掉了剩余空间，而且随内容增长越来越长。
+  // 那套 flex 已经撤掉，**本条 sticky 与它无关**，可以单独成立：
+  //   · sticky 是**相对定位**元素，不改变父容器高度，也不会吃掉剩余空间；
+  //   · 卡片本身就是滚动容器（① 的 overflow-y:auto），所以 bottom:0 贴的是
+  //     卡片可视底边，正是按钮行该待的地方；
+  //   · 卡片内部布局仍然完全交回站点 —— 这里只移动按钮行自己的绘制位置。
   return 'div.' + EDITOR_CARD_CLASS + '{max-height:var(' + EDITOR_MAX_VAR + ',' +
     COMPOSER_FALLBACK_VH + 'vh) !important;overflow-y:auto !important;overflow-x:hidden !important;}' +
     'div.' + EDITOR_CARD_CLASS + ' img,div.' + EDITOR_CARD_CLASS + ' video{' +
     'max-height:' + EDITOR_IMAGE_MAX_VH + 'vh !important;width:auto !important;' +
     'object-fit:contain !important;}' +
+    // 按钮行贴底。z-index 提到内容之上，避免站点给卡片内容设了更高层级时按钮被盖住；
+    // padding-bottom 用卡片自身的底部内边距补齐（由 applyCap 写入变量），
+    // 否则按钮行会有一截落在卡片的 padding 区域里、被滚动容器裁掉。
+    'div.' + EDITOR_ACTION_ROW_CLASS + '{position:sticky !important;bottom:0 !important;' +
+    'z-index:3 !important;padding-bottom:var(' + EDITOR_BOTTOM_PAD_VAR + ',0px) !important;}' +
   // 站点用的是「悬浮式滚动条」，只在滚动瞬间显形、停下即淡出，触屏上基本看不到。
   // 这里**只给编辑卡片**补一根常驻细滚动条（上一版是全局强制，才会波及其它弹层、
   // 甚至出现两根条）；主对话框不动 —— 它自带的那根本来就正常。
@@ -231,6 +243,27 @@ export function computeComposerCapPx(visibleHeightPx: number): number {
 }
 
 /**
+ * 由「当前可视高度」计算内联编辑卡片的高度上限（px）。
+ *
+ * 纯函数，便于单测 —— 脚本里用的是同一个公式。**必须保证结果 ≤ 可视高度**：
+ * 卡片刻意留出上下空间（卡片连同按钮行一起落进可视区，靠的就是这个上限），
+ * 正常屏幕上取可视高度的 {@link EDITOR_MAX_RATIO}，并在
+ * {@link EDITOR_MIN_PX}～{@link EDITOR_MAX_PX} 之间夹紧。
+ *
+ * 下限要先对可视高度取 min：`EDITOR_MIN_PX` 是给正常屏幕兜底的，
+ * 可视区极小时（悬浮窗拖到很小、自由多窗）若直接用它当下限，
+ * 算出的上限会反过来超过可视区本身 —— 卡片反而比可视区还高，按钮照样看不见。
+ */
+export function computeEditorCapPx(visibleHeightPx: number): number {
+  if (!visibleHeightPx || visibleHeightPx <= 0) {
+    return EDITOR_MIN_PX;
+  }
+  const floor: number = Math.min(EDITOR_MIN_PX, Math.round(visibleHeightPx * 0.6));
+  const scaled: number = Math.max(floor, visibleHeightPx * EDITOR_MAX_RATIO);
+  return Math.round(Math.min(EDITOR_MAX_PX, scaled));
+}
+
+/**
  * 是否在 User-Agent 中附加 `Mobile` 标记。
  *
  * **默认关闭**，因为只需要 `metaViewport(true)` 就能让 viewport 生效，
@@ -251,6 +284,40 @@ export const VIEWPORT_RESIZE_DEBOUNCE_MS: number = 260;
 
 /** 判定「可输入元素」的选择器，与输入框高度上限使用同一套 */
 export const EDITABLE_SELECTOR: string = 'textarea,input,[contenteditable="true"]';
+
+/**
+ * 主对话框（底部那个「输入框 + 深度思考 / 智能搜索 + 发送」）的**文字标记**。
+ *
+ * 为什么需要它：识别主对话框原先只有两条路 —— ①从「另一个可编辑元素」向上找固定
+ * 定位祖先；②全文档几何扫描「固定/粘性 + 贴底 + 矮条」。两者都会**内容的形态**影响：
+ *
+ *   · 路①依赖「除编辑框外还有别的可编辑元素」。进入编辑态后站点会把主输入框换成
+ *     占位元素，这条路经常直接落空；
+ *   · 路②有节点数上限（4000），而且要求候选元素此刻恰好贴在可视区底边。
+ *     历史回答里**带数学公式 / 表格**时，回答节点的数量和高度都远大于纯文本 ——
+ *     实测现象正是「有公式或表格时主对话框不隐藏，纯文本时正常」。
+ *
+ * 文字标记则与回答内容完全无关：只要主对话框还在 DOM 里，这几个串就去找得到它，
+ * 再由它向上收敛到「固定定位的祖先」或「贴底的那一层」。多语言站点上这些串会变，
+ * 因此匹配是**多标记、任一命中即可**，并且允许调用方再叠加结构性判据。
+ */
+export const COMPOSER_MARKER_TEXTS: Array<string> = [
+  '给 DeepSeek 发送消息',
+  '给DeepSeek发送消息',
+  '深度思考',
+  '智能搜索',
+  '内容由 AI 生成',
+];
+
+/**
+ * 主对话框文字标记的正则（由 {@link COMPOSER_MARKER_TEXTS} 直接拼出，避免两处脱节）。
+ *
+ * 只做「包含」判断而不做全等：站点会给这些串套上高亮/换行用的子节点，
+ * 元素自身的 textContent 可能带空白或拼接了别的字符。
+ */
+export function buildComposerMarkerPattern(): string {
+  return COMPOSER_MARKER_TEXTS.join('|');
+}
 
 /**
  * 组装 Web 的 User-Agent。
@@ -340,7 +407,7 @@ export function buildViewportFixScript(viewportWidthVp: number = 0): string {
           'textarea,[contenteditable="true"]{max-height:var(${COMPOSER_CAP_VAR},${COMPOSER_FALLBACK_VH}vh) !important;overflow-y:auto !important;}' +
           // 编辑历史消息 + 键盘弹出时，主对话框让位（类由 buildComposerAutoHideScript 增删）
           '.${COMPOSER_HIDDEN_CLASS}{display:none !important;}' +
-          // 内联编辑卡片：限高 + 列向 flex + 按钮行 sticky 贴底 —— 取消/确认按钮
+          // 内联编辑卡片：限高 + 图片限高 + 按钮行 sticky 贴底 —— 取消/确认按钮
           // 在「图片 + 长文本」下也不会被挤出可视区。详见 buildEditorCardCss 的说明。
           '${buildEditorCardCss()}';
         d.head.appendChild(s);
@@ -362,8 +429,11 @@ export function buildViewportFixScript(viewportWidthVp: number = 0): string {
             d.documentElement.style.setProperty('${COMPOSER_CAP_VAR}', cap + 'px');
             // 内联编辑卡片的上限：按**实时可视高度**算，且必须明显小于可视高度 ——
             // 卡片连同按钮行一起落进可视区，靠的就是这个上限。
+            // 公式与 computeEditorCapPx 完全一致（含「极窄可视区时下限不得反超」那条），
+            // 单测直接钉住那个纯函数，这里只把常量代进来。
+            var editFloor = Math.min(${EDITOR_MIN_PX}, Math.round(h * 0.6));
             var editCap = Math.min(${EDITOR_MAX_PX},
-              Math.max(${EDITOR_MIN_PX}, h * ${EDITOR_MAX_RATIO}));
+              Math.max(editFloor, h * ${EDITOR_MAX_RATIO}));
             editCap = Math.round(editCap);
             d.documentElement.style.setProperty('${EDITOR_MAX_VAR}', editCap + 'px');
             // 按钮行 sticky 贴底时，卡片自身的底部内边距要补进按钮行的 padding，
@@ -413,10 +483,41 @@ export function buildKeyboardStateScript(keyboardUp: boolean): string {
     try {
       window.__dsKeyboardUp = ${flag};
       if (window.__dsApplyComposerAutoHide) { window.__dsApplyComposerAutoHide(); }
+      // 兜底安全网：键盘收起时**强制**把所有隐藏类拆干净。
+      //
+      // 为什么不能只依赖 applyComposerAutoHide：它的恢复逻辑可能因为「那一刻
+      // 恰好没找到主对话框」而只是把引用清掉，而类已经加在了**另一个**元素上
+      //（实机日志抓到过：隐藏目标从 DIV._020ab5b 换成了外层 DIV._871cbca，
+      // 两个都带过这个类）。这里再扫一遍文档，确保「键盘收起 ⇒ 主对话框可见」
+      // 这条保证不依赖任何单点判据。
+      var swept = 0;
+      if (!window.__dsKeyboardUp) {
+        try {
+          var still = document.querySelectorAll('.${COMPOSER_HIDDEN_CLASS}');
+          for (var si = 0; si < still.length; si++) {
+            still[si].classList.remove('${COMPOSER_HIDDEN_CLASS}');
+            swept++;
+          }
+          window.__dsHiddenCard = null;
+        } catch (eSw) { }
+      }
       // 回带一次判定详情：实机出问题时，日志里直接能看到「有没有找到主对话框、
-      // 它是不是固定底栏、当前算不算内联编辑态」，不必再单独出诊断包
+      // 它是不是固定底栏、当前算不算内联编辑态」，不必再单独出诊断包。
+      // 关键：键盘弹起/收起的那一刻就是「该不该隐藏」的决策点，所以这里除了
+      // autoHideInfo，还要带上「编辑卡片认没认出来」和 apply 的现场（__dsLastApply）——
+      // 实机问题正是「键盘起来了、主对话框却没隐藏」，这三项一起看即可定位。
       var info = window.__dsComposerAutoHideInfo || null;
-      return 'kb:' + (window.__dsKeyboardUp ? 'up' : 'down') + ' ' + JSON.stringify(info);
+      var extra = {
+        pick: String(window.__dsComposerPickPath || ''),
+        editCard: window.__dsEditCard
+          ? (String(window.__dsEditCard.tagName || '?') + '.' +
+            String(window.__dsEditCard.className || '').split(' ')[0] +
+            '/h' + Math.round(window.__dsEditCard.getBoundingClientRect().height))
+          : null,
+        last: window.__dsLastApply || null
+      };
+      return 'kb:' + (window.__dsKeyboardUp ? 'up' : 'down') + ' swept=' + swept + ' ' +
+        JSON.stringify(info) + ' | ' + JSON.stringify(extra);
     } catch (e) {
       return 'kb-error';
     }
@@ -451,17 +552,21 @@ export function buildRetryFocusScript(): string {
  * 需求：**键盘弹出 + 正在内联编辑历史消息**时，底部主对话框（输入框 + 深度思考 /
  * 智能搜索 + 附件 + 发送按钮）应隐藏，把可视区让给正在编辑的内容；其余情况保持原样。
  *
- * 判定依据（都是结构性的，不依赖站点哈希类名）：
+ * 判定依据（顺序即优先级，每一步都排除「编辑卡片自己」）：
  *   · **键盘**：由 {@link buildKeyboardStateScript} 推入的 `window.__dsKeyboardUp`；
- *   · **主对话框**：从「除了当前聚焦元素之外的另一个可编辑元素」向上找**底部固定容器**
- *     —— 优先 `position: fixed | sticky` 的祖先（站点把主对话框做成固定底栏），
- *     找不到再退回「底边贴着可视区底部、且高度不超过可视高度 45%」的最高祖先；
- *   · **内联编辑态**：当前聚焦的是可编辑元素，**且它不在底部固定容器里**
- *     （在固定底栏里的就是主输入框自己，不该隐藏它）。
+ *   · **主对话框**：
+ *     ① **文字标记**（{@link COMPOSER_MARKER_TEXTS}）—— 与回答形态完全无关，
+ *        由标记元素向上收敛到固定定位祖先 / 贴底容器。**带数学公式、表格的回答靠这一步**；
+ *     ② 从「除当前聚焦元素之外的另一个可编辑元素」向上找 `position: fixed | sticky` 祖先；
+ *     ③ 全文档几何扫描（有节点上限，内容复杂时可能落空，只作最后兜底）；
+ *   · **内联编辑态**：当前聚焦的是可编辑元素，**且它不在主对话框里**
+ *     （在主对话框里的就是主输入框自己，不该隐藏它）。
  *
  * 命中时给主对话框加 {@link COMPOSER_HIDDEN_CLASS}（`display:none`）让位，
- * 并把正在编辑的元素 `scrollIntoView` 到可视区中央；条件不满足则移除该类恢复显示。
- * 幂等安装，监听 focusin / focusout / resize，随焦点与尺寸变化自愈。
+ * 条件不满足则移除该类恢复显示。幂等安装，监听 focusin / focusout / resize，随焦点与尺寸变化自愈。
+ *
+ * 命中路径会写进 `__dsComposerAutoHideInfo.pickPath`（marker / editable / geometry / cached / none），
+ * 实机上「该隐藏却没隐藏」时看它即可判断是不是回答形态（公式、表格）把路径挤掉了。
  */
 export function buildComposerAutoHideScript(): string {
   return `(function () {
@@ -499,7 +604,18 @@ export function buildComposerAutoHideScript(): string {
         }
         return null;
       }
-      // 元素是否位于底部固定容器内（是则它本身就是主对话框的一部分）
+      // 元素是否位于底部固定容器内（是则它本身就是主对话框的一部分）。
+      //
+      // **当前已无调用方**（保留下来是为了留住下面这条坑的说明）：
+      // 判断「是不是主对话框」的地方都已改成 {@link isInComposer} 的真实包含关系判据。
+      //
+      // ⚠️ **不要用它判断「是不是在编辑卡片里」**：这个判据只看祖先链上有没有
+      // position: fixed / sticky，而**消息列表本身就是 sticky**（实测 ds-virtual-list）。
+      // 于是「编辑卡片在消息列表里」会让它一律返回 true —— 历史版本据此认为
+      // 「正在编辑的是主对话框」，把 inlineEdit 判死，主对话框就永远不隐藏了。
+      // 实机现象正是「回答里带数学公式 / 表格时不隐藏，纯文本时正常」：
+      // 公式/表格让列表进入 sticky + 可滚动的状态，纯文本下往往还没触发。
+      // 判断「是否属于主对话框」请用 {@link isInComposer}。
       function isInBottomCard(el) {
         var node = el;
         var depth = 0;
@@ -510,6 +626,13 @@ export function buildComposerAutoHideScript(): string {
           depth++;
         }
         return false;
+      }
+
+      // 「这个可编辑元素是不是主对话框自己的输入框」—— 判据是**真实包含关系**，
+      // 不是"祖先链上有没有定位元素"。
+      function isInComposer(el, composer) {
+        if (!el || !composer || !document.contains(composer)) { return false; }
+        return composer === el || (!!composer.contains && composer.contains(el));
       }
       // 独立的「底部固定栏」扫描：**不依赖可编辑元素**。
       // 实机实测：进入编辑历史消息态后，主对话框的输入框会被站点换成占位元素
@@ -544,9 +667,221 @@ export function buildComposerAutoHideScript(): string {
         return best;
       }
 
+      // 主对话框的**文字标记**：与回答内容无关，因此在「带公式 / 表格的回答」下依然成立。
+      // 值来自 COMPOSER_MARKER_TEXTS（应用侧常量），保证两边不会脱节。
+      var COMPOSER_MARKER_TEXTS = ${JSON.stringify(COMPOSER_MARKER_TEXTS)};
+      var COMPOSER_MARKERS = new RegExp('${buildComposerMarkerPattern()}');
+
+      // 按文字标记找主对话框 —— 与几何、节点数量都无关。
+      //
+      // 实机问题（本函数存在的理由）：历史回答里带**数学公式 / 表格**时，主对话框不会收起；
+      // 纯文本回答则正常。两条旧路径都会被内容形态影响：
+      //   · 「找另一个可编辑元素」在编辑态常常落空（主输入框被换成占位元素）；
+      //   · 几何扫描有 4000 节点上限，且要求候选此刻恰好贴底 —— 公式/表格让回答节点
+      //     数与高度都大幅上升，扫描要么提前截断、要么候选项不再满足「贴底矮条」。
+      // 文字标记只依赖「主对话框还在 DOM 里」，因此不受回答形态影响。
+      //
+      // 性能：历史对话很长时 DOM 可能上万节点，**绝不能在它上面无脑全量遍历并读 textContent**。
+      // 所以先用「包含指定文字」的选择器让内核在 C++ 侧筛（:contains() 是内核扩展，
+      // **实机 ArkWeb 7.0 实测不支持、会直接抛错**，所以它只是「能用就更快」的快路径）；
+      // 真正兜底是**有上限**的全量扫描：只对叶子级小元素跑正则。
+      function findComposerByMarker() {
+        var best = null;
+        var bestBottom = -1;
+        function consider(el) {
+          if (!el) { return; }
+          var target = containerOfMarker(el);
+          if (!target) { return; }
+          var r = target.getBoundingClientRect();
+          if (r.height <= 0 || r.width <= 0) { return; }
+          // 同名元素可能不止一处（页面别处也可能有「深度思考」字样），
+          // 主对话框一定最靠下，取 bottom 最大的那个
+          if (r.bottom > bestBottom) { bestBottom = r.bottom; best = target; }
+        }
+        // ① 选择器优先：:contains() 是内核扩展（非标准），用 try 包住；不支持时它会直接抛错
+        var textHit = false;
+        for (var k = 0; k < ${COMPOSER_MARKER_TEXTS.length}; k++) {
+          var text = COMPOSER_MARKER_TEXTS[k];
+          var nodes = null;
+          try { nodes = document.querySelectorAll('body *:contains("' + text + '")'); } catch (eSel) { nodes = null; }
+          if (!nodes || !nodes.length) { continue; }
+          textHit = true;
+          // **从后往前**取：:contains() 会连同「包含这段文字的所有祖先」一起命中，
+          // 而文档顺序是祖先在前、叶子在后。倒着找才能优先命中真正的小元素
+          //（顺着的头几个一定是 html/body/各层包装，取它们会把整个页面当成主对话框）。
+          var cap = nodes.length < 24 ? nodes.length : 24;
+          for (var n = nodes.length - 1; n >= 0 && n >= nodes.length - cap; n--) {
+            consider(nodes[n]);
+          }
+        }
+        if (textHit) { return best; }
+        // ② 兜底：有上限的全量扫描。只对**叶子级**小元素跑正则 ——
+        //    标记文字在深层小节点里，沿途每个祖先都会命中，没必要逐个检查
+        try {
+          var all = document.querySelectorAll('body *');
+          var limit = all.length < 6000 ? all.length : 6000;
+          for (var i = 0; i < limit; i++) {
+            var el = all[i];
+            if (el.children && el.children.length > 0) { continue; }
+            var own = String(el.textContent || '').trim();
+            if (!own || own.length > 40) { continue; }
+            if (!COMPOSER_MARKERS.test(own)) { continue; }
+            consider(el);
+          }
+        } catch (eScan) { }
+        return best;
+      }
+
+      // 实机拿到的底栏结构（MatePad，可视高度 689、输入框宽 774），供判据参考：
+      //
+      //   TEXTAREA._27c9245        h60  w774   输入框
+      //   └ DIV._24fad49           h60  w774   输入框外层
+      //     └ DIV._020ab5b         h118 w774   ← **整条底栏**（输入框 + 工具栏 + 附件/发送）
+      //       ├ …输入框…
+      //       └ DIV.ec4f5d61       h58  w774   ← 工具栏（"深度思考智能搜索"）
+      //         └ DIV._77cefa5     h124 w776   ← 紧贴底栏的包装
+      //           └ DIV.aaff8b8f   h124 w776     ← 再外层
+      //             └ DIV._871cbca h152 w1053    ← **页面底栏容器**（含"内容由 AI 生成"）
+      //               └ DIV.ds-virtual-list h601 w1117  ← 消息列表，绝不能收
+      //
+      // 结论：想连「深度思考 / 智能搜索 / 附件 / 发送」一起收掉，就必须收到
+      // **同时装着输入框与工具栏的那一层**（上面的 _020ab5b）。只按宽度收会收到
+      // 输入框外层（_24fad49，h60），于是留下一细条工具栏 —— 实机就是这么复现的。
+      //
+      // 判据因此改成**语义式**的：从锚点向上，找第一个「同时包含锚点、又包含
+      // 工具栏文字标记」的祖先。这条判据与尺寸无关，站点改版换类名、改字号都不影响；
+      // 唯一需要的兜底是那条 **高度 ≤ 可视高度 45%** —— 否则会一路收上去，
+      // 把整张消息列表（h601）或右侧侧栏抽屉当成底栏藏掉。
+      //
+      // 文字标记用**预设文字探测**（parentTextIncludes）而不是读每个叶子元素的
+      // textContent：后者要在长对话里把每个祖先的整棵子树文本都读出来，
+      // 代价太高；前者只读 3 个短标记，命中即返回。
+      function parentTextIncludes(el, texts) {
+        if (!el || !el.closest) { return false; }
+        for (var i = 0; i < texts.length; i++) {
+          try { if (el.closest('*:contains("' + texts[i] + '")')) { return true; } } catch (ePt) { }
+        }
+        return false;
+      }
+
+      // 实机确认 :contains() 会被内核拒绝（lastInvoke.hasMarker = "no-selector"），
+      // 因此上面的探测基本走不通；真正生效的是这条**有上限的叶子扫描**。
+      // 从候选祖先向下找「叶子级小元素」并比对文字：命中即认定这一层装着工具栏。
+      function subtreeHasMarkerText(el) {
+        if (!el) { return false; }
+        try {
+          var leaves = el.querySelectorAll('*');
+          var lim = leaves.length < 400 ? leaves.length : 400;
+          for (var i = 0; i < lim; i++) {
+            var n = leaves[i];
+            if (n.children && n.children.length > 0) { continue; }
+            var t = String(n.textContent || '').trim();
+            if (!t || t.length > 24) { continue; }
+            if (COMPOSER_MARKERS.test(t)) { return true; }
+          }
+        } catch (eSm) { }
+        return false;
+      }
+
+      // 从「命中的标记元素」向上收敛到该被隐藏的那一层容器。
+      function containerOfMarker(el) {
+        var de = document.documentElement;
+        var vh = de ? de.clientHeight : 0;
+        var node = el;
+        var depth = 0;
+        // 一路向上，记住最后一个「高度仍然合理」的祖先，作为找不到工具栏时的退路：
+        // 只要它比锚点大，至少能把输入框连它的外层一起收掉。
+        var fallback = null;
+        while (node && node !== document.body && depth < 12) {
+          var r = node.getBoundingClientRect();
+          // 高度护栏：超过可视高度 45% 的祖先不再是「底栏」，而是消息列表 / 侧栏抽屉，
+          // 收掉它们会把整个界面弄空。遇到就直接停，返回已经找到的退路。
+          if (vh > 0 && r.height > vh * 0.45) { break; }
+          if (r.height > 0) {
+            if (node !== el) { fallback = node; }
+            // 这一层同时装着工具栏 → 就是整条底栏
+            if (node !== el && subtreeHasMarkerText(node)) { return node; }
+          }
+          node = node.parentElement;
+          depth++;
+        }
+        return fallback;
+      }
+
+      // 按**主输入框占位文案**找主对话框 —— 最可靠的锚点。
+      //
+      // 实机实测（探针 textareaCands）：主输入框的 placeholder 是「给 DeepSeek 发送消息 」，
+      // 而且**编辑历史消息时它依然留在 DOM 里**（编辑卡片是另一个 textarea，
+      // 挂在消息列表里），因此这条锚点在两种状态下都成立。
+      //
+      // 用 indexOf 而不是全等：实测该 placeholder 带尾随空格，站点也可能改前后空白。
+      function findComposerByPlaceholder(excludeCard) {
+        try {
+          var tas = document.querySelectorAll(
+            'textarea[placeholder],[contenteditable="true"][placeholder],input[placeholder],' +
+            'textarea,[contenteditable="true"]');
+          for (var i = 0; i < tas.length; i++) {
+            var ta = tas[i];
+            if (excludeCard && excludeCard.contains(ta)) { continue; }
+            var ph = String((ta.getAttribute && ta.getAttribute('placeholder')) || '');
+            var lab = String((ta.getAttribute && ta.getAttribute('aria-label')) || '');
+            var hit = false;
+            for (var k = 0; k < COMPOSER_MARKER_TEXTS.length; k++) {
+              var t = COMPOSER_MARKER_TEXTS[k];
+              if (ph.indexOf(t) >= 0 || lab.indexOf(t) >= 0) { hit = true; break; }
+            }
+            if (!hit) { continue; }
+            var c = containerOfMarker(ta);
+            if (c && (!excludeCard || (!c.contains(excludeCard) && !excludeCard.contains(c)))) {
+              return c;
+            }
+          }
+          return null;
+        } catch (ePh) {
+          return null;
+        }
+      }
+
+      // 选定「该隐藏的主对话框」。按可靠性从高到低依次尝试，前一步命中就用它：
+      //   ① **主输入框占位文案**（最可靠：与回答形态无关，编辑历史消息时它仍在 DOM 里）；
+      //   ② **文字标记**（深度思考 / 智能搜索 / 内容由 AI 生成 —— 与回答形态无关）；
+      //   ③ 从「另一个可编辑元素」向上找底部容器（历史路径）；
+      //   ④ 全文档几何扫描（最后的兜底，有节点上限，内容复杂时可能落空）。
+      // 每一步都排除「编辑卡片自己」：卡片被误当成主对话框藏掉，正在编辑的文本域会
+      // 立刻失焦、键盘随即收起（实机复现过的「键盘闪现」）。
+      // 同时记下是**哪条路径**命中的（path），实机上「该隐藏却没隐藏」时一眼可辨。
+      function pickComposer(mainEdit, editCard) {
+        var hidden = window.__dsHiddenCard;
+        function usable(el) {
+          if (!el || !document.contains(el)) { return false; }
+          // 含焦点的候选绝不能隐藏：会让正在编辑的输入框失焦、键盘随即收起
+          if (containsActive(el)) { return false; }
+          // 编辑卡片（及其子树）绝不能当主对话框隐藏
+          if (editCard && (el === editCard || el.contains(editCard) || editCard.contains(el))) {
+            return false;
+          }
+          return true;
+        }
+        var byPlaceholder = findComposerByPlaceholder(editCard);
+        if (usable(byPlaceholder)) { window.__dsComposerPickPath = 'placeholder'; return byPlaceholder; }
+        var byMarker = findComposerByMarker();
+        if (usable(byMarker)) { window.__dsComposerPickPath = 'marker'; return byMarker; }
+        var byEditable = mainEdit ? findBottomCard(mainEdit) : null;
+        if (usable(byEditable)) { window.__dsComposerPickPath = 'editable'; return byEditable; }
+        var byGeometry = findBottomCardByGeometry();
+        if (usable(byGeometry)) { window.__dsComposerPickPath = 'geometry'; return byGeometry; }
+        // 最后退一步用「上次隐藏的那个」的父元素：它已经 display:none，
+        // 上面几条路都会跳过它，不记住引用就会「藏起来后再也恢复不了」
+        if (hidden && document.contains(hidden)) {
+          var parent = hidden.parentElement || hidden;
+          if (usable(parent)) { window.__dsComposerPickPath = 'cached'; return parent; }
+        }
+        window.__dsComposerPickPath = 'none';
+        return null;
+      }
+
       // 内联编辑卡片 = 从被聚焦的编辑元素向上找到**最近的**、含有「取消 / 保存 / 发送」
       // 这类操作按钮的祖先。
-      //
       // 两个坑都踩过：
       //   · 按钮集里不能放「关闭」—— 文本域自带清除按钮就可能带 aria-label="关闭"，
       //     会让最近祖先只框住文本域本身；
@@ -589,57 +924,184 @@ export function buildComposerAutoHideScript(): string {
         return null;
       }
 
-      // 容器里可能**同时**装着「内联编辑卡片」和「主对话框」（实测手机端就是）
-      // —— 那就不能整块隐藏（会把正在编辑的输入框一起藏掉，键盘立刻收起），
-      // 只隐藏其中「不含当前焦点」且贴底的那个子元素，也就是主对话框本身。
-      function hideTargetFor(card) {
-        if (!card) { return null; }
-        if (!containsActive(card)) { return card; }
-        var kids = card.children;
-        var best = null;
-        var bestBottom = -1;
-        for (var i = 0; i < kids.length; i++) {
-          var k = kids[i];
-          if (k === document.activeElement || containsActive(k)) { continue; }
-          var r = k.getBoundingClientRect();
-          if (r.height <= 0 || r.width <= 0) { continue; }
-          if (r.bottom > bestBottom) { bestBottom = r.bottom; best = k; }
+      // 把卡片「贴底对齐」到可视区内：文本域在上面、按钮行在下面，
+      // block:'end' 让卡片底边对齐可视底边 —— 按钮行因此落在可视区内
+      //（居中反而可能把按钮推到键盘后面）。
+      //
+      // **只在键盘弹起时做**：apply 会被 resize 触发，而收起键盘同样触发 resize，
+      // 若每次都滚，收起键盘时编辑框会被强行拉到最底部（实机现象：
+      // 「历史对话内容足够多时，一收键盘对话框自动坍塌到底部」）。
+      function alignEditCard() {
+        var card = window.__dsEditCard;
+        if (!card || !document.contains(card)) { return; }
+        try { card.scrollIntoView({ block: 'end' }); } catch (e4) { }
+        // 记下当前外高与内容高：下一次据此判断「卡片是不是又长高了」
+        window.__dsEditCardMetric = Math.round(card.getBoundingClientRect().height) + '/' +
+          card.scrollHeight;
+      }
+
+      // 卡片是否比上次记录的又长高了（只认**内容变高**）。
+      //
+      // 为什么用「内容高」而不是「外高」：卡片被限高后外高是封顶的，图片加载完 / 长文本
+      // 贴进来只会让 scrollHeight 变大，继续拿外高比较会漏判 —— 而漏判的后果就是
+      // 按钮行被挤出可视区却没有人去重新对齐（本轮要修的现象）。
+      // 只认"长高"不认"变矮"：收起键盘只会让尺寸变小，因此绝不会把编辑框拽到最底部
+      //（那是上一版「一收键盘就坍塌到底部」的成因）。
+      function cardGrew(card) {
+        var now = Math.round(card.getBoundingClientRect().height) + '/' + card.scrollHeight;
+        var last = window.__dsEditCardMetric;
+        if (!last) { window.__dsEditCardMetric = now; return false; }
+        if (last === now) { return false; }
+        var lastScroll = parseInt(String(last).split('/')[1], 10) || 0;
+        var nowScroll = parseInt(String(now).split('/')[1], 10) || 0;
+        var lastH = parseInt(String(last).split('/')[0], 10) || 0;
+        var nowH = parseInt(String(now).split('/')[0], 10) || 0;
+        return nowScroll > lastScroll || nowH > lastH;
+      }
+
+      // 键盘弹起 + 卡片长高时，重新贴底对齐一次。由**轻量路径**（输入 / DOM 变化）调用：
+      // 站点在编辑历史消息时是异步渲染的 —— 图片解码完成后撑高卡片、长文本贴进来撑高卡片，
+      // 都发生在「第一次滚完」之后，只靠 resize 根本等不到。
+      // 未弹键盘时只更新基线、不动滚动位置。
+      function realignEditCardIfGrown() {
+        try {
+          var card = window.__dsEditCard;
+          if (!card || !document.contains(card)) { return; }
+          if (!cardGrew(card)) { return; }
+          window.__dsEditCardMetric = Math.round(card.getBoundingClientRect().height) + '/' +
+            card.scrollHeight;
+          if (window.__dsKeyboardUp) { alignEditCard(); }
+        } catch (eGrow) { }
+      }
+
+      // 说明：容器里**可能同时**装着「内联编辑卡片」和「主对话框」（实测手机端就是），
+      // 历史版本因此写过一个专门的函数：容器含焦点时只隐藏其中「不含焦点」的子元素。
+      // 现在改由 pickComposer 用**真实包含关系**挑选主对话框本身（并带 containsActive 兜底），
+      // 不会再选到含焦点的容器，那个函数已无调用方，故移除，避免留下两条打架的判据。
+
+      // 拆掉**所有**还带着隐藏类的元素，并清空引用。
+      //
+      // 为什么要扫全文档、而不是只拆 __dsHiddenCard 那一个：
+      // 实机日志抓到了两个元素**先后**都被加过这个类（编辑过程中隐藏目标从
+      // DIV._020ab5b 变成了外层的 DIV._871cbca）。原来恢复时只 remove 引用记的那一个，
+      // 另一个的类就永久留下了 —— 表现正是「点一次修改，主对话框再也回不来」，
+      // 而且因为它的 display:none 还在，输入框祖先链里那一层始终是 d=n/h0。
+      // 更糟的是站点重新渲染后引用会变成**游离节点**，那时连 remove 都无从谈起。
+      // 所以恢复一律以 DOM 为准：谁带着这个类就拆谁，拆完再清引用。
+      function clearHiddenClassEverywhere() {
+        try {
+          var marked = document.querySelectorAll('.${COMPOSER_HIDDEN_CLASS}');
+          for (var i = 0; i < marked.length; i++) {
+            marked[i].classList.remove('${COMPOSER_HIDDEN_CLASS}');
+          }
+          window.__dsHiddenCard = null;
+          return marked.length;
+        } catch (eClr) {
+          return -1;
         }
-        return best;
       }
 
       window.__dsApplyComposerAutoHide = function () {
         try {
           var ae = document.activeElement;
           var aeEditable = !!(ae && ae.matches && ae.matches('${EDITABLE_SELECTOR}'));
+          var keyboardUp = !!window.__dsKeyboardUp;
+          // 键盘收起时复位「本次编辑已滚动过」标记：下次再弹起仍会滚一次，
+          // 而收起过程中的 resize 不会再动滚动位置
+          if (!keyboardUp) { window.__dsEditScrolled = false; }
+          // 记一次「被调用」的现场：诊断时用来判断 apply 到底有没有跑、跑的时候焦点在哪。
+          // 尤其要区分「apply 没被调用」与「调用但没找到目标」——两者的修法完全不同。
+          window.__dsLastApply = {
+            t: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0,
+            kbd: !!window.__dsKeyboardUp,
+            ae: ae ? ((ae.tagName || '?') + '|' + String(ae.className || '').slice(0, 20) +
+              '|' + String(ae.getAttribute ? (ae.getAttribute('placeholder') || '') : '').slice(0, 16)) : 'null',
+            editables: document.querySelectorAll('${EDITABLE_SELECTOR}').length,
+            hasMarker: (function () {
+              try { return document.querySelectorAll('body *:contains("深度思考")').length > 0; }
+              catch (eMk0) { return 'no-selector'; }
+            })()
+          };
           var list = document.querySelectorAll('${EDITABLE_SELECTOR}');
           var mainEdit = null;
           for (var i = 0; i < list.length; i++) {
             if (list[i] !== ae) { mainEdit = list[i]; break; }
           }
-          var card = mainEdit ? findBottomCard(mainEdit) : null;
-          // 主输入框在编辑态会退化成占位元素、不再是可编辑节点，
-          // 因此上面这条路可能落空，用独立的几何扫描兜底；
-          // 再退一步用「上次隐藏的那个」的父元素 —— 它已经 display:none，
-          // 几何扫描会跳过它，不记住引用就会「藏起来后再也恢复不了」
-          if (!card && window.__dsHiddenCard && document.contains(window.__dsHiddenCard)) {
-            card = window.__dsHiddenCard.parentElement || window.__dsHiddenCard;
+
+          // 先算编辑卡片，再选主对话框（挑选时要排除卡片）。
+          //
+          // 「是不是内联编辑态」的判据**刻意不看 isInBottomCard**：那个函数只看祖先链上
+          // 有没有 fixed/sticky，而**消息列表本身就是 sticky**（实测 ds-virtual-list），
+          // 于是「编辑卡片在消息列表里」会被一律判成「在主对话框里」，inlineEdit 永远为
+          // false、主对话框永不隐藏 —— 实机现象正是「回答带数学公式 / 表格时不隐藏，
+          // 纯文本正常」。这里改成先找出主对话框，再用**真实包含关系**排除它，
+          // 另外叠一条「焦点元素不能正好是主对话框节点本身」的保险。
+          var editCard = null;
+          var editArea = null;
+          var priorComposer = window.__dsComposer;
+          if (aeEditable &&
+            (!isInComposer(ae, priorComposer) && ae !== priorComposer)) {
+            editArea = ae;
+            editCard = findEditCard(ae);
+          } else if (window.__dsEditCard && document.contains(window.__dsEditCard) &&
+            window.__dsEditCard.querySelector('${EDITABLE_SELECTOR}')) {
+            // **收起键盘后编辑态仍然开着**（焦点可能已经不在输入框上）。
+            // 此时如果撤掉标记，限高与粘性按钮行会一起失效，卡片长高后按钮被裁掉 ——
+            // 实机现象就是「输入完收起键盘，按钮显示不全」。只要卡片还在，就继续标着。
+            // 但要排除「这个卡片其实属于主对话框」——那说明当前不在内联编辑态。
+            if (!isInComposer(window.__dsEditCard, priorComposer)) {
+              editCard = window.__dsEditCard;
+              editArea = window.__dsEditCard.querySelector('${EDITABLE_SELECTOR}');
+            }
           }
-          if (!card) { card = findBottomCardByGeometry(); }
-          // 真正隐藏谁：容器里若同时装着编辑卡片和主对话框，只隐藏主对话框那一块 ——
-          // 整块藏掉会把正在编辑的输入框一起藏掉，它立刻失焦、键盘随即收起（键盘闪现）。
-          var target = hideTargetFor(card);
-          // 万一之前错误地藏过含焦点的容器，立刻纠正回来
+
+          // 选主对话框：占位文案 → 文字标记 → 另一个可编辑元素的底部容器 → 几何扫描。
+          // **只有「键盘确实收起了、且之前没有处于内联编辑」时才提前收工**：
+          // 那一轮唯一要做的事就是把上一次隐藏的恢复出来（上面已做）。
+          // 用一个**latch**（__dsWasInlineEdit）而不是「卡片此刻在不在」来判断：
+          // 站点是异步渲染的，键盘弹起信号也可能晚到 —— 用户点开编辑框那一刻
+          // 键盘标志还是 false，若只用 !keyboardUp 提前返回，就会连编辑卡片都不标记，
+          // 于是限高与粘性按钮行一起失效（「一按回车按钮就被裁掉」会复发）。
+          if (!keyboardUp && !window.__dsWasInlineEdit) {
+            // 这一轮唯一要做的事：把主对话框放出来（扫全文档拆类，不看引用）
+            clearHiddenClassEverywhere();
+            window.__dsComposerAutoHideInfo = {
+              keyboardUp: false,
+              activeEditable: aeEditable,
+              inlineEdit: false,
+              restored: true,
+              pickPath: String(window.__dsComposerPickPath || ''),
+              editCardCls: '',
+              editCardH: 0,
+              rowFound: !!window.__dsActionRow,
+              rowSticky: window.__dsActionRow
+                ? String((styleOf(window.__dsActionRow) || {}).position || '') : ''
+            };
+            return 'ok';
+          }
+          var composer = pickComposer(mainEdit, editCard);
+          // 记住这次选中的主对话框：markEditCardNow / focusin 都用它来判断
+          // 「焦点是不是在主对话框里」，从而与 isInBottomCard 那条错误判据彻底脱钩
+          window.__dsComposer = composer;
+          // 选出来的主对话框绝不能包含正在编辑的元素：一旦包含，隐藏它会让文本域立刻
+          // 失焦、键盘随即收起。宁可不隐藏。
+          var target = composer;
+          // 含焦点的容器绝不能保持隐藏（会让正在编辑的输入框失焦、键盘随即收起）
           if (window.__dsHiddenCard && containsActive(window.__dsHiddenCard)) {
-            window.__dsHiddenCard.classList.remove('${COMPOSER_HIDDEN_CLASS}');
-            window.__dsHiddenCard = null;
+            clearHiddenClassEverywhere();
           }
-          var keyboardUp = !!window.__dsKeyboardUp;
-          // 键盘收起时复位「本次编辑已滚动过」标记：下次再弹起仍会滚一次，
-          // 而收起过程中的 resize 不会再动滚动位置
-          if (!keyboardUp) { window.__dsEditScrolled = false; }
 
-
+          // ⚠️ **「键盘收起 ⇒ 主对话框必须显示」是一条硬保证，无条件执行。**
+          //
+          // 实机问题（本段存在的理由）：点一次「修改」之后，无论接着做什么操作，
+          // 主对话框都再也不回来。抓到的日志给出了确切原因：编辑过程中隐藏目标
+          // 从 DIV._020ab5b 变成了外层 DIV._871cbca，**两个元素都带上了隐藏类**，
+          // 而旧代码恢复时只 remove 引用记的那一个 —— 另一个永久留在 display:none。
+          // 所以这里改成扫全文档拆类（clearHiddenClassEverywhere），
+          // 不看引用、不看判据，只要键盘不在就一定把主对话框放出来。
+          if (!keyboardUp) {
+            clearHiddenClassEverywhere();
+          }
 
           // 主对话框点「发送」后收起软键盘：实测手机端键盘不自动收起（平板端会）。
           // 发送动作本身已完成，这里只是主动 blur 掉焦点，让两端行为一致。
@@ -649,65 +1111,64 @@ export function buildComposerAutoHideScript(): string {
           // 加上 click/pointerup/touchend 捕获监听 + 延迟 blur 之后反而收不起了
           // （推测是拦截了站点自己的失焦/收起流程）。键盘的显示与收起交回内核与站点：
           // 「点图片不弹键盘」仍由 setSoftKeyboardBehaviorMode(DISABLE_AUTO_KEYBOARD_ON_ACTIVE) 保证。
-          // 内联编辑态：焦点在可编辑元素上，且它不在底部固定容器里
-          var inlineEdit = keyboardUp && aeEditable && !isInBottomCard(ae);
+          // 内联编辑态：焦点在编辑卡片内的可编辑元素上（非主对话框的输入框）
+          var inlineEdit = keyboardUp && !!editCard;
+          // latch：本次「编辑历史消息」期间是否真的进入过内联编辑。
+          // 键盘收起时清掉，供下一次编辑复用；上面那个提前收工的分支要看它。
+          if (inlineEdit) { window.__dsWasInlineEdit = true; }
+          else if (!keyboardUp) { window.__dsWasInlineEdit = false; }
           if (inlineEdit) {
             if (target) {
               target.classList.add('${COMPOSER_HIDDEN_CLASS}');
               window.__dsHiddenCard = target;
             }
           } else {
+            // 恢复显示：一律扫全文档拆类（见 clearHiddenClassEverywhere 的说明）。
+            // 只 remove 引用记的那一个是不够的 —— 先后可能有两个元素被加过这个类。
             if (target) { target.classList.remove('${COMPOSER_HIDDEN_CLASS}'); }
-            if (window.__dsHiddenCard) {
-              window.__dsHiddenCard.classList.remove('${COMPOSER_HIDDEN_CLASS}');
-              window.__dsHiddenCard = null;
-            }
+            clearHiddenClassEverywhere();
           }
 
-          // 内联编辑卡片：只要被聚焦的编辑元素不在底部固定栏里，就把它所在的卡片标记出来，
-          // CSS 据此限高（按钮行不被顶出可视区）、并让点击卡片空白处聚焦到编辑框
-          var editCard = null;
-          if (aeEditable && !isInBottomCard(ae)) {
-            editCard = findEditCard(ae);
-          } else if (window.__dsEditCard && document.contains(window.__dsEditCard) &&
-            window.__dsEditCard.querySelector('${EDITABLE_SELECTOR}')) {
-            // **收起键盘后编辑态仍然开着**（焦点可能已经不在输入框上）。
-            // 此时如果撤掉标记，限高与粘性按钮行会一起失效，卡片长高后按钮被裁掉 ——
-            // 实机现象就是「输入完收起键盘，按钮显示不全」。只要卡片还在，就继续标着。
-            editCard = window.__dsEditCard;
-          }
           if (editCard) {
             editCard.classList.add('${EDITOR_CARD_CLASS}');
             if (window.__dsEditCard && window.__dsEditCard !== editCard) {
               window.__dsEditCard.classList.remove('${EDITOR_CARD_CLASS}');
+              // 换了卡片，旧的尺寸基线作废，否则会误判成「长高了」
+              window.__dsEditCardMetric = '';
             }
             window.__dsEditCard = editCard;
             // 按钮行（卡片的那个含按钮的子元素）单独标类 → CSS 给它 sticky 贴底，
             // 这样即使站点把按钮行放在卡片中间、后面还有别的节点，按钮也不会被卷走。
             // 键盘已收起时焦点不在输入框上，改用卡片里的输入框来定位按钮行。
-            var rowAnchor = aeEditable ? ae : editCard.querySelector('${EDITABLE_SELECTOR}');
+            var rowAnchor = editArea || editCard.querySelector('${EDITABLE_SELECTOR}');
             var row = findActionRow(editCard, rowAnchor);
-              if (window.__dsActionRow && window.__dsActionRow !== row) {
-                window.__dsActionRow.classList.remove('${EDITOR_ACTION_ROW_CLASS}');
-                window.__dsActionRow = null;
-              }
-              if (row) {
-                row.classList.add('${EDITOR_ACTION_ROW_CLASS}');
-                window.__dsActionRow = row;
-              }
-              // 卡片贴底对齐滚动：文本域在上面、按钮行在下面，
-              // block:'end' 能保证按钮行落在可视区内（居中反而可能把按钮推到键盘后面）。
-              //
-              // **只在键盘弹起时滚一次**：apply 会被 resize 触发，而收起键盘同样触发 resize，
-              // 若每次都滚，收起键盘时编辑框会被强行拉到最底部 —— 实机现象正是
-              // 「历史对话内容足够多时，一收键盘对话框自动坍塌到底部」。
-              if (keyboardUp && !window.__dsEditScrolled) {
-                window.__dsEditScrolled = true;
-                try { editCard.scrollIntoView({ block: 'end' }); } catch (e4) { }
-              }
+            if (window.__dsActionRow && window.__dsActionRow !== row) {
+              window.__dsActionRow.classList.remove('${EDITOR_ACTION_ROW_CLASS}');
+              window.__dsActionRow = null;
+            }
+            if (row) {
+              row.classList.add('${EDITOR_ACTION_ROW_CLASS}');
+              window.__dsActionRow = row;
+            }
+            // 什么时候需要重新贴底对齐：
+            //   a) 键盘刚弹起、本次编辑还没滚过 —— 进入编辑态的正常时机；
+            //   b) **卡片又长高了** —— 图片加载完、长文本被贴进来、换行重排都会
+            //      让卡片在「第一次滚完之后」继续变高，一旦超过可视区，
+            //      底部的按钮行就被挤出可视区（正是本轮要修的现象）。
+            //      判断依据是"只认长高"，因此收起键盘（尺寸只减不增）不会触发，
+            //      不会重蹈「一收键盘编辑框就坍塌到底部」。
+            var grew = cardGrew(editCard);
+            if (keyboardUp && (!window.__dsEditScrolled || grew)) {
+              window.__dsEditScrolled = true;
+              alignEditCard();
+            } else {
+              window.__dsEditCardMetric = Math.round(editCard.getBoundingClientRect().height) +
+                '/' + editCard.scrollHeight;
+            }
           } else if (window.__dsEditCard) {
             window.__dsEditCard.classList.remove('${EDITOR_CARD_CLASS}');
             window.__dsEditCard = null;
+            window.__dsEditCardMetric = '';
             if (window.__dsActionRow) {
               window.__dsActionRow.classList.remove('${EDITOR_ACTION_ROW_CLASS}');
               window.__dsActionRow = null;
@@ -718,14 +1179,26 @@ export function buildComposerAutoHideScript(): string {
             keyboardUp: keyboardUp,
             activeEditable: aeEditable,
             inlineEdit: inlineEdit,
-            hasCard: !!card,
-            hidden: card ? card.classList.contains('${COMPOSER_HIDDEN_CLASS}') : false,
-            cardPos: card ? String((styleOf(card) || {}).position || '') : '',
-            cardCls: card ? String(card.className || '').slice(0, 40) : '',
-            cardH: card ? Math.round(card.getBoundingClientRect().height) : 0,
+            hasCard: !!target,
+            hidden: target ? target.classList.contains('${COMPOSER_HIDDEN_CLASS}') : false,
+            // 是**哪条路径**找到的主对话框：marker / editable / geometry / cached / none。
+            // 实机上「该隐藏却没隐藏」时先看这个 —— marker 表示文字标记命中（与回答形态无关）；
+            // 只剩 geometry 或 none，说明回答形态把两条主路径都挤掉了。
+            pickPath: String(window.__dsComposerPickPath || ''),
+            cardPos: target ? String((styleOf(target) || {}).position || '') : '',
+            cardCls: target ? String(target.className || '').slice(0, 40) : '',
+            cardH: target ? Math.round(target.getBoundingClientRect().height) : 0,
             editCardCls: editCard ? String(editCard.className || '').slice(0, 40) : '',
             editCardH: editCard ? Math.round(editCard.getBoundingClientRect().height) : 0,
             editCardMax: String((styleOf(editCard) || {}).maxHeight || ''),
+            // 按钮行诊断：实机上「按钮看不见」时，先看这两项 ——
+            //   rowFound=false  → 没认出按钮行（选择器/按钮文字变了）
+            //   rowSticky=false → 认出来了但 sticky 没生效（选择器没绑上或没被覆盖）
+            rowFound: !!window.__dsActionRow,
+            rowSticky: window.__dsActionRow
+              ? String((styleOf(window.__dsActionRow) || {}).position || '') : '',
+            rowH: window.__dsActionRow
+              ? Math.round(window.__dsActionRow.getBoundingClientRect().height) : 0,
             // 祖先链诊断：编辑卡片到底是哪一层、限高有没有落在它身上。
             // 只有实机拿得到真实结构（站点类名是哈希的，猜不出来），出问题时看这一段即可。
             editChain: (function () {
@@ -761,20 +1234,57 @@ export function buildComposerAutoHideScript(): string {
       }
 
       // 内联编辑态下，站点是异步渲染的：程序化 focus 可能被后到的 DOM 变更顶掉，
-      // 表现为「点了输入框但键盘不弹」。这里在焦点丢失时补一次 focus（只在真的丢了、
-      // 且没有别的可编辑元素接管时才补，避免打乱用户的光标位置）。
-      function scheduleFocusHeal(el) {
-        var delays = [120, 320, 700];
+      // 表现为「点了输入框但键盘不弹」。
+      //
+      // 与旧版的关键差别：旧版只认「当初那个元素」，一旦站点**把节点换掉**
+      //（编辑卡片重渲染很常见），document.contains(el) 立刻为 false，
+      // 后面几次补焦全部直接 return —— 焦点再也不回来，键盘自然也不弹。
+      // 现在改为握着「卡片 + 编辑会话号」，每次补焦都**重新查一遍卡片里的活输入框**：
+      //   · 节点被换掉 → 找到新的那个，照样能把焦点接回来；
+      //   · 会话结束（用户点了取消/保存、或卡片被卸载）→ 会话号变化，整批补焦作废，
+      //     绝不会在退出编辑后还去抢焦点。
+      function currentEditable() {
+        var card = window.__dsEditCard;
+        if (!card || !document.contains(card)) { return null; }
+        var ae = document.activeElement;
+        if (ae && ae.matches && ae.matches('${EDITABLE_SELECTOR}') && card.contains(ae)) {
+          return ae;
+        }
+        return card.querySelector('textarea,[contenteditable="true"]') ||
+          card.querySelector('${EDITABLE_SELECTOR}');
+      }
+
+      // 是否该放弃这次补焦（焦点已经去了别处，说明用户/站点另有打算）。
+      function healBlockedByOtherTarget(card) {
+        var ae = document.activeElement;
+        if (!ae || ae === document.body || ae === document.documentElement) { return false; }
+        if (!ae.matches || !ae.matches('${EDITABLE_SELECTOR}')) { return false; }
+        // 焦点落在别的可编辑元素上：在卡片里就是用户自己挪了位置，在卡片外则是
+        // 主输入框等站点自己的行为 —— 两种情况都不该抢。
+        return true;
+      }
+
+      function scheduleFocusHeal() {
+        // 归一到数字：会话号在 focusin 里用 (x || 0) + 1 递增，
+        // 这里若直接取 undefined 会让后续比较永远不等、补焦整批失效。
+        var session = window.__dsEditSession || 0;
+        var delays = [90, 240, 480, 900];
         for (var i = 0; i < delays.length; i++) {
           setTimeout(function () {
             try {
-              if (!el || !document.contains(el)) { return; }
-              var last = window.__dsLastEditFocus;
-              if (!last || last !== el) { return; }
-              var ae = document.activeElement;
-              if (ae === el) { return; }
-              if (ae && ae.matches && ae.matches('${EDITABLE_SELECTOR}')) { return; }
+              // 会话已经变了（退出编辑 / 换了另一条消息）→ 这次补焦作废
+              if (!window.__dsEditSession || window.__dsEditSession !== session) { return; }
+              // 用户已经点了取消 / 保存 → 立刻停手，绝不和提交抢焦点
+              if (window.__dsEditSubmitAt) { return; }
+              var card = window.__dsEditCard;
+              if (!card || !document.contains(card)) { return; }
+              var el = currentEditable();
+              if (!el) { return; }
+              // 用户在此期间自己把光标放到了别的输入框上 → 不要抢
+              if (healBlockedByOtherTarget(card)) { return; }
+              if (document.activeElement === el) { return; }
               el.focus();
+              window.__dsLastEditFocus = el;
               reportFocus('refocus');
             } catch (e6) { }
           }, delays[i]);
@@ -784,10 +1294,33 @@ export function buildComposerAutoHideScript(): string {
       document.addEventListener('focusin', function (ev) {
         var t = ev.target;
         if (t && t.matches && t.matches('${EDITABLE_SELECTOR}')) {
-          var inline = !isInBottomCard(t);
-          window.__dsLastEditFocus = inline ? t : null;
-          reportFocus(inline ? 'inline' : 'composer');
-          if (inline) { scheduleFocusHeal(t); }
+          // 判据统一为「是不是主对话框自己的输入框」（真实包含关系）。
+          // 不能用 isInBottomCard：消息列表自身 sticky，会把列表里的编辑框误判成主对话框，
+          // 于是编辑历史消息时既不补焦、也不上报 —— 正是「有公式/表格时不隐藏」的同一根因。
+          var inline = !isInComposer(t, window.__dsComposer);
+          if (inline) {
+            // 进入（或切换）内联编辑：换一个会话号，让上一批补焦立即作废
+            if (window.__dsLastEditFocus !== t) {
+              window.__dsEditSession = (window.__dsEditSession || 0) + 1;
+            }
+            window.__dsLastEditFocus = t;
+            reportFocus('inline');
+            scheduleFocusHeal();
+          } else {
+            // 焦点回到主输入框 → 内联编辑结束，作废补焦并清掉「已提交」标记
+            window.__dsLastEditFocus = null;
+            window.__dsEditSession = (window.__dsEditSession || 0) + 1;
+            window.__dsEditSubmitAt = 0;
+            reportFocus('composer');
+          }
+        } else if (t && t.closest && !isInComposer(t, window.__dsComposer)) {
+          // 点到编辑卡片里的「取消 / 保存 / 确认」：用户已经做了决定，补焦必须立刻停手
+          //（否则卡片卸载的瞬间焦点落到 body，补焦会把光标抢回输入框、和提交打架）。
+          var submitCard = window.__dsEditCard;
+          if (submitCard && submitCard.contains(t) && t.closest('button,[role="button"]')) {
+            window.__dsEditSubmitAt = Date.now();
+            window.__dsEditSession = (window.__dsEditSession || 0) + 1;
+          }
         }
         window.__dsApplyComposerAutoHide();
       }, true);
@@ -805,7 +1338,15 @@ export function buildComposerAutoHideScript(): string {
         try {
           var ae = document.activeElement;
           if (!ae || !ae.matches || !ae.matches('${EDITABLE_SELECTOR}')) { return; }
-          if (isInBottomCard(ae)) { return; }
+          // 判据是「真实包含关系」，不能用 isInBottomCard ——
+          // 消息列表自身 sticky，会把列表里的编辑卡片误判成主对话框（详见该函数说明）。
+          // 这里只排除「焦点确实在主对话框里」这一种情况（那是在输入新消息，不是编辑历史）。
+          if (isInComposer(ae, window.__dsComposer)) { return; }
+          if (window.__dsEditCard && window.__dsEditCard.contains(ae)) {
+            // 已经标记过：只需确保长高时重新贴底对齐（下面的调用会处理）
+            realignEditCardIfGrown();
+            return;
+          }
           var card = findEditCard(ae);
           if (card && !card.classList.contains('${EDITOR_CARD_CLASS}')) {
             if (window.__dsEditCard && window.__dsEditCard !== card) {
@@ -822,6 +1363,10 @@ export function buildComposerAutoHideScript(): string {
             row.classList.add('${EDITOR_ACTION_ROW_CLASS}');
             window.__dsActionRow = row;
           }
+          // 卡片长高了（图片加载完 / 长文本贴进来）就重新贴底对齐 ——
+          // 这条路径在输入与 DOM 变化时都会跑，正好覆盖"第一次滚完之后才变高"的时机；
+          // 未弹键盘时它只更新基线，不动滚动位置。
+          realignEditCardIfGrown();
         } catch (eMk) { }
       }
       window.__dsMarkEditCard = markEditCardNow;
@@ -848,13 +1393,24 @@ export function buildComposerAutoHideScript(): string {
       //   ③ 第一次点击落空，必须再点一次按钮才生效。
       // 站点自己的点击→聚焦逻辑本来就能唤起键盘（期望 6 要保留的正是它），所以整段移除。
 
-      // 供应用侧调用：重新聚焦当前编辑元素（配合 setSoftKeyboardBehaviorMode 兜底拉键盘）
+      // 供应用侧调用：重新聚焦当前编辑元素（配合 setSoftKeyboardBehaviorMode 兜底拉键盘）。
+      //
+      // 这里也必须**重新查活节点**：旧版只认 __dsLastEditFocus，站点一旦把文本域节点换掉
+      // 就返回 'no-target'，应用侧再怎么兜底都拉不起键盘 —— 正是「有概率不弹」里
+      // 最难查的那一半。现在依次退：活焦点 → 卡片里现查的输入框 → 放弃。
       window.__dsRetryEditFocus = function () {
         try {
+          // 用户已经点了取消 / 保存，或编辑态已经结束 → 不要抢焦点
+          if (window.__dsEditSubmitAt) { return 'submitted'; }
+          var card = window.__dsEditCard;
           var el = window.__dsLastEditFocus;
+          if (!el || !document.contains(el)) {
+            el = (card && document.contains(card)) ? currentEditable() : null;
+          }
           if (!el || !document.contains(el)) { return 'no-target'; }
           try { el.blur(); } catch (e9) { }
           el.focus();
+          window.__dsLastEditFocus = el;
           reportFocus('retry');
           return 'retried';
         } catch (e10) {
@@ -936,6 +1492,23 @@ export const OVERLAY_DIALOG: string = 'dialog';
 export const OVERLAY_MENU: string = 'menu';
 /** 探测结果：带「关闭」入口的网页界面（如侧栏多选模式）——不进历史，只能点掉 */
 export const OVERLAY_CLOSABLE: string = 'closable';
+/**
+ * 探测结果：**图片/文件预览态**。
+ *
+ * 与 dialog 的区别在**关闭方式**：预览层在全屏遮罩里、点图片本身是缩放而非关闭，
+ * 且多数不往历史里 push。若当 dialog 处理会走 `canGoBack ? backward : dismiss-overlay`，
+ * 两条路都关不掉 —— 用户侧滑后预览没关、系统把这次返回当退出应用，直接回到桌面。
+ * 单列一类，强制走「关闭入口 / 点遮罩」路径，**绝不 backward、绝不退出**。
+ */
+export const OVERLAY_PREVIEW: string = 'preview';
+/**
+ * 探测结果：**确认类弹窗**（删除确认等，含「确认/删除」+「取消」成对按钮）。
+ *
+ * 单独识别的原因：这类弹窗常带「取消」文字按钮，会被下面的 closable 规则先命中，
+ * 走「点关闭入口」那条路；点不中时返回就被当成退出应用（实机表现同样是回到桌面）。
+ * 明确成 confirm 类后可用更可靠的关闭顺序（先点取消、再 Esc、最后点遮罩空白）。
+ */
+export const OVERLAY_CONFIRM: string = 'confirm';
 
 /**
  * 检测**网页自己的瞬时界面**是否开着，并指出是**哪一类**（供返回手势决策使用）。
@@ -954,6 +1527,8 @@ export const OVERLAY_CLOSABLE: string = 'closable';
  * {@link buildOverlayDismissScript} 点掉。**探测失败一律返回空串**，
  * 即回落到「按界面层级决策」，不会因为一次探测失败就把返回手势让给网页。
  */
+
+
 export function buildOverlayProbeScript(): string {
   return `(function () {
     try {
@@ -974,6 +1549,112 @@ export function buildOverlayProbeScript(): string {
           Math.round(r.width) + 'x' + Math.round(r.height);
       }
       var i;
+      // 0) 判定辅助：向上找「模态容器」。
+      //
+      // ⚠️ 实测（MatePad，删除确认弹窗）：DeepSeek 的 .ds-modal 是
+      //    position:relative + z-index:auto，**不是** fixed/absolute。
+      //    因此绝不能按 position/zIndex 找容器 —— 那样一个都匹配不到。
+      //    改为按「尺寸像个弹窗」筛选：宽 120~96% 视口、高 80~92% 视口。
+      function modalAncestorOf(el, maxUp) {
+        var up = el, k = 0;
+        while (up && up !== document.body && k < maxUp) {
+          var r = up.getBoundingClientRect();
+          if (r.width >= 120 && r.height >= 80 &&
+            r.width <= window.innerWidth * 0.96 &&
+            r.height <= window.innerHeight * 0.92) {
+            return up;
+          }
+          up = up.parentElement; k++;
+        }
+        return null;
+      }
+      // 找「文字恰好等于 text」的可见元素。
+      // ⚠️ 不要求叶子节点：实测按钮是 DIV(含 2 个子节点) > SPAN，
+      //    要求 element.children.length === 0 会把按钮整个漏掉。
+      //    改用 innerText 精确相等 + 尺寸像按钮 + 无子元素文本，三者共同约束。
+      function findTextButton(root, text) {
+        var all = root.querySelectorAll('body *, *');
+        var lim = all.length < 3000 ? all.length : 3000;
+        for (var i = 0; i < lim; i++) {
+          var el = all[i];
+          if (String(el.innerText || '').trim() !== text) { continue; }
+          if (!visible(el, 4, 4)) { continue; }
+          var r = el.getBoundingClientRect();
+          if (r.width > 320 || r.height > 120) { continue; }
+          // 取「最小的那个」匹配元素：外层 DIV 与其内 SPAN 文字相同，
+          // 命中 SPAN 才是真正的按钮体（外层可能就是整个弹窗）。
+          return el;
+        }
+        return null;
+      }
+
+      // 0a) 预览态：模态浮层里有一张**大尺寸图片**（接近全屏的查看器）。
+      //     必须放在通用 dialog 之前 —— 预览层往往也带 role=dialog，被先抢走就会走错关闭路径。
+      var imgs = document.querySelectorAll('img');
+      for (i = 0; i < imgs.length; i++) {
+        var im = imgs[i];
+        if (!visible(im, 160, 160)) { continue; }
+        var ir = im.getBoundingClientRect();
+        var big = Math.min(ir.width, ir.height) >= window.innerHeight * 0.3 ||
+          (ir.width * ir.height) >= (window.innerWidth * window.innerHeight) * 0.35;
+        if (!big) { continue; }
+        var host = modalAncestorOf(im, 10);
+        if (!host) { continue; }
+        var hr = host.getBoundingClientRect();
+        // 宿主必须盖住大半屏，否则只是正文里的大图
+        if (hr.width < window.innerWidth * 0.8 || hr.height < window.innerHeight * 0.7) { continue; }
+        return hit('${OVERLAY_PREVIEW}', host);
+      }
+
+      // 0b) 确认类弹窗：「取消/关闭」+（确认/确定/删除…）成对出现在同一个弹窗容器里。
+      //     实测文案："取消" 与 "删除" 同属一个 380x180 的 .ds-modal。
+      var cancelEl = findTextButton(document, '取消') || findTextButton(document, '关闭') ||
+        findTextButton(document, 'Cancel');
+      if (cancelEl) {
+        var host = modalAncestorOf(cancelEl, 10);
+        if (host) {
+          var confTexts = ['确认', '确定', '删除', '确认删除', '移除', '清空',
+            '删除该对话', '删除对话', '继续', 'OK', 'Confirm', 'Delete'];
+          for (i = 0; i < confTexts.length; i++) {
+            if (findTextButton(host, confTexts[i])) {
+              return hit('${OVERLAY_CONFIRM}', host);
+            }
+          }
+        }
+      }
+
+      // 0c) **容器级兜底**：只要存在可见的模态弹窗容器，就归为确认类。
+      //
+      // 为什么需要它：0b 依赖具体按钮文案，而文案会随功能变化 ——
+      // 实测同一个"删除"动作就有「删除」与「删除该对话」两种按钮文字，
+      // 漏一个就会退回"关不掉 → 系统当成退出/网页后退"的老问题。
+      // "存在可见弹窗容器"是稳定得多的结构信号，因此放在文案规则之后兜底。
+      //
+      // ⚠️ 不能无条件归类：实测「系统设置」弹窗没有可点的关闭入口、也不响应 Esc，
+      //    **只能用 backward() 关**。若无条件归为确认类，会从"能关"退化成"关不掉"。
+      //    因此要求容器内**确实存在可点的关闭/取消入口**才判定为确认类。
+      // 同时排除靠近全屏的容器（那是抽屉/侧栏，已有专门处理）。
+      var modals = document.querySelectorAll('.ds-modal, [role="dialog"], [aria-modal="true"]');
+      for (i = 0; i < modals.length; i++) {
+        var md = modals[i];
+        if (!visible(md, 80, 80)) { continue; }
+        var mr = md.getBoundingClientRect();
+        if (mr.width > window.innerWidth * 0.96 && mr.height > window.innerHeight * 0.92) { continue; }
+        var dismissible = !!findTextButton(md, '取消') || !!findTextButton(md, '关闭') ||
+          !!findTextButton(md, 'Cancel');
+        if (!dismissible) {
+          var lbls = md.querySelectorAll('[aria-label],[title]');
+          for (var li = 0; li < lbls.length; li++) {
+            var lv = String(lbls[li].getAttribute('aria-label') ||
+              lbls[li].getAttribute('title') || '').trim();
+            if (/^(close|关闭|取消|close dialog)$/i.test(lv) && visible(lbls[li], 4, 4)) {
+              dismissible = true; break;
+            }
+          }
+        }
+        if (dismissible) { return hit('${OVERLAY_CONFIRM}', md); }
+      }
+
       // 1) 弹窗：有 role=dialog / aria-modal，且有实际尺寸（过滤隐藏模板）
       var dialogs = document.querySelectorAll('[role="dialog"],[aria-modal="true"]');
       for (i = 0; i < dialogs.length; i++) {
@@ -992,22 +1673,12 @@ export function buildOverlayProbeScript(): string {
         if (!/^(close|关闭|取消|关闭对话框|close dialog)$/i.test(lab)) { continue; }
         if (visible(cands[i], 4, 4)) { return hit('${OVERLAY_CLOSABLE}', cands[i]); }
       }
-      // 3b) 只有**文字**的「取消 / 关闭」按钮（手机上「选择对话」顶部就是文字「取消」，
-      //     没有 aria-label）。为了不误判成页面里的普通文案，要求同时满足：
-      //       · 是叶子节点（整段文字就是这四个字，不是长句的一部分）
-      //       · 尺寸像按钮（宽 ≤ 320、高 ≤ 120，留出渲染差异与内边距）
-      //     命中后日志里的 detail= 会给出它到底是什么元素。
-      var leaves = document.querySelectorAll('body *');
-      var limit = leaves.length < 4000 ? leaves.length : 4000;
-      for (i = 0; i < limit; i++) {
-        var el = leaves[i];
-        if (el.children && el.children.length > 0) { continue; }
-        var txt = String(el.innerText || '').trim();
-        if (!/^(取消|关闭)$/.test(txt)) { continue; }
-        if (!visible(el, 4, 4)) { continue; }
-        var lr = el.getBoundingClientRect();
-        if (lr.width > 320 || lr.height > 120) { continue; }
-        return hit('${OVERLAY_CLOSABLE}', el);
+      // 3b) 兜底：只有文字「取消 / 关闭」的按钮（部分机型没有 aria-label）。
+      //     复用 findTextButton —— 实测按钮是 DIV(含子节点) > SPAN，
+      //     早先"要求叶子节点"的写法会把这类按钮整个漏掉。
+      var textCancel = findTextButton(document, '取消') || findTextButton(document, '关闭');
+      if (textCancel) {
+        return hit('${OVERLAY_CLOSABLE}', textCancel);
       }
       return '${OVERLAY_NONE}';
     } catch (e) {
@@ -1034,7 +1705,8 @@ export function parseOverlayKind(raw: string, kindOnly: boolean = true): string 
   if (!kindOnly) {
     return v;
   }
-  if (kind === OVERLAY_DIALOG || kind === OVERLAY_MENU || kind === OVERLAY_CLOSABLE) {
+  if (kind === OVERLAY_DIALOG || kind === OVERLAY_MENU || kind === OVERLAY_CLOSABLE ||
+    kind === OVERLAY_PREVIEW || kind === OVERLAY_CONFIRM) {
     return kind;
   }
   return OVERLAY_NONE;
@@ -1056,6 +1728,210 @@ export function parseOverlayKind(raw: string, kindOnly: boolean = true): string 
  * 返回 `clicked-close` / `clicked-outside` / `clicked-outside-body` / `none:<原因>`，
  * 供应用侧日志确认到底走了哪条路径。
  */
+/**
+ * 关闭**预览态 / 确认弹窗**的脚本（与 {@link buildOverlayDismissScript} 分开）。
+ *
+ * 为什么不能复用菜单那套：菜单的关闭是「点自己的关闭入口 → 点展开态触发按钮 → 把点击派发到 body」；
+ * 而预览层的遮罩属于它自己，派发到 body 关不掉，且**点图片本身是缩放而非关闭**。
+ * 确认弹窗同理：必须点到它自己的「取消」才安全（点确认/删除会执行破坏性操作）。
+ *
+ * 策略顺序（按可靠度与安全性递减）：
+ *   1. 浮层内明确的关闭入口（aria-label / title 含 close、关闭、取消）；
+ *   2. 浮层内文字恰为「取消 / 关闭 / Cancel」的叶子按钮；
+ *   3. 派发 Escape 键（多数模态监听 Esc 关闭）；
+ *   4. 点遮罩空白 —— **必须避开图片本体**，否则会命中"点图片缩放"。
+ *
+ * @param kind 探测得到的界面类型（OVERLAY_PREVIEW / OVERLAY_CONFIRM）
+ * @returns 可直接交给 runJavaScript 的 IIFE 脚本
+ */
+export function buildOverlayCloseScript(kind: string): string {
+  const kindJs: string = JSON.stringify(kind);
+  return `(function () {
+    try {
+      function visible(el, minW, minH) {
+        var cs = window.getComputedStyle(el);
+        if (!cs) { return false; }
+        if (cs.display === 'none' || cs.visibility === 'hidden') { return false; }
+        if (cs.opacity !== '' && Number(cs.opacity) === 0) { return false; }
+        var r = el.getBoundingClientRect();
+        return r.width >= minW && r.height >= minH;
+      }
+      function modalAncestorOf(el, maxUp) {
+        var up = el, k = 0;
+        while (up && k < maxUp) {
+          var st = window.getComputedStyle(up);
+          if (st && (st.position === 'fixed' || st.position === 'absolute')) {
+            var z = parseInt(st.zIndex, 10);
+            if (!isNaN(z) && z >= 10) { return up; }
+          }
+          up = up.parentElement; k++;
+        }
+        return null;
+      }
+      function fire(el, x, y) {
+        try {
+          var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          el.dispatchEvent(new MouseEvent('click', opts));
+        } catch (e2) { }
+      }
+      var kind = ${kindJs};
+      var i, j;
+
+      // 找「最上层的大浮层」作为作用域，避免点到页面其他地方
+      var host = null;
+      var all = document.querySelectorAll('body *');
+      var lim = all.length < 4000 ? all.length : 4000;
+      for (i = 0; i < lim; i++) {
+        var el = all[i];
+        var st = window.getComputedStyle(el);
+        if (!st || (st.position !== 'fixed' && st.position !== 'absolute')) { continue; }
+        var z = parseInt(st.zIndex, 10);
+        if (isNaN(z) || z < 10) { continue; }
+        if (!visible(el, 120, 80)) { continue; }
+        var r = el.getBoundingClientRect();
+        if (r.width < window.innerWidth * 0.6 || r.height < window.innerHeight * 0.5) { continue; }
+        if (!host || z >= host.z) { host = { el: el, z: z }; }
+      }
+      if (!host) { return 'no-host'; }
+      var scope = host.el;
+
+      // 1) 明确的关闭入口
+      var cands = scope.querySelectorAll('[aria-label],[title]');
+      for (i = 0; i < cands.length; i++) {
+        var lab = String(cands[i].getAttribute('aria-label') ||
+          cands[i].getAttribute('title') || '').trim();
+        if (!/^(close|关闭|取消|关闭对话框|close dialog|取消下载)$/i.test(lab)) { continue; }
+        if (!visible(cands[i], 4, 4)) { continue; }
+        fire(cands[i], 0, 0);
+        return 'closed-by-label:' + lab;
+      }
+
+      // 2) 文字按钮：取消 / 关闭
+      var leaves = scope.querySelectorAll('body *, *');
+      var llim = leaves.length < 3000 ? leaves.length : 3000;
+      for (i = 0; i < llim; i++) {
+        var le = leaves[i];
+        if (le.children && le.children.length > 0) { continue; }
+        var t = String(le.innerText || '').trim();
+        if (t !== '取消' && t !== '关闭' && t !== 'Cancel') { continue; }
+        if (!visible(le, 4, 4)) { continue; }
+        var lr = le.getBoundingClientRect();
+        if (lr.width > 320 || lr.height > 120) { continue; }
+        fire(le, lr.left + lr.width / 2, lr.top + lr.height / 2);
+        return 'closed-by-text:' + t;
+      }
+
+      // 3) Escape 键
+      try {
+        var kev = { bubbles: true, cancelable: true, key: 'Escape', code: 'Escape', keyCode: 27, which: 27 };
+        var tgt = document.activeElement || document.body;
+        tgt.dispatchEvent(new KeyboardEvent('keydown', kev));
+        tgt.dispatchEvent(new KeyboardEvent('keyup', kev));
+        document.dispatchEvent(new KeyboardEvent('keydown', kev));
+      } catch (e3) { }
+
+      // 4) 点遮罩空白：九宫格取样，跳过图片/视频本体与浮层内的子内容
+      var r2 = scope.getBoundingClientRect();
+      var pts = [[0.04, 0.04], [0.96, 0.04], [0.04, 0.96], [0.96, 0.96], [0.5, 0.03], [0.5, 0.97]];
+      for (i = 0; i < pts.length; i++) {
+        var x = Math.round(r2.left + r2.width * pts[i][0]);
+        var y = Math.round(r2.top + r2.height * pts[i][1]);
+        var hitEl = document.elementFromPoint(x, y);
+        if (!hitEl) { continue; }
+        // 命中图片/视频/画布 ⇒ 那是"点图片缩放"，跳过
+        var tag = String(hitEl.tagName || '').toUpperCase();
+        if (tag === 'IMG' || tag === 'VIDEO' || tag === 'CANVAS') { continue; }
+        // 命中浮层内部的内容盒子 ⇒ 也可能触发内容行为，跳过；只点遮罩层自身
+        if (hitEl !== scope) { continue; }
+        fire(hitEl, x, y);
+        return 'closed-by-backdrop:' + x + ',' + y;
+      }
+      return 'not-closed:' + kind;
+    } catch (e) {
+      return 'close-error';
+    }
+  })();`;
+}
+
+/**
+ * 取出当前**预览态**里那张图的数据，返回 `dataURL|建议文件名`（无预览则返回空串）。
+ *
+ * 为什么在网页侧取：预览图可能就是用户刚发的本地图、或是带鉴权的远端图。
+ * 在页面上下文里用 fetch 拉取可以自动带上 Cookie 与鉴权头，ArkTS 侧直接下载会 401；
+ * 同时也能省掉"再猜一次 URL"的逻辑 —— 探测与取图用的是同一套定位规则。
+ *
+ * 返回格式：`data:image/png;base64,xxxx|<文件名>`；失败返回 `error:<原因>`。
+ */
+export function buildPreviewImageScript(): string {
+  return `(async function () {
+    try {
+      function visible(el, minW, minH) {
+        var cs = window.getComputedStyle(el);
+        if (!cs) { return false; }
+        if (cs.display === 'none' || cs.visibility === 'hidden') { return false; }
+        if (cs.opacity !== '' && Number(cs.opacity) === 0) { return false; }
+        var r = el.getBoundingClientRect();
+        return r.width >= minW && r.height >= minH;
+      }
+      function modalAncestorOf(el, maxUp) {
+        var up = el, k = 0;
+        while (up && k < maxUp) {
+          var st = window.getComputedStyle(up);
+          if (st && (st.position === 'fixed' || st.position === 'absolute')) {
+            var z = parseInt(st.zIndex, 10);
+            if (!isNaN(z) && z >= 10) { return up; }
+          }
+          up = up.parentElement; k++;
+        }
+        return null;
+      }
+      // 用与探测**完全相同**的规则定位预览大图，避免"探测说是预览、取图却取到别的图"
+      var imgs = document.querySelectorAll('img');
+      var target = null, i;
+      for (i = 0; i < imgs.length; i++) {
+        var im = imgs[i];
+        if (!visible(im, 160, 160)) { continue; }
+        var ir = im.getBoundingClientRect();
+        var big = Math.min(ir.width, ir.height) >= window.innerHeight * 0.3 ||
+          (ir.width * ir.height) >= (window.innerWidth * window.innerHeight) * 0.35;
+        if (!big) { continue; }
+        if (!modalAncestorOf(im, 10)) { continue; }
+        target = im; break;
+      }
+      if (!target) { return 'error:no-preview-image'; }
+      var src = target.currentSrc || target.src || '';
+      if (!src) { return 'error:no-src'; }
+      var resp = await fetch(src, { credentials: 'include' });
+      if (!resp.ok) { return 'error:http-' + resp.status; }
+      var blob = await resp.blob();
+      var dataUrl = await new Promise(function (res, rej) {
+        var fr = new FileReader();
+        fr.onload = function () { res(fr.result); };
+        fr.onerror = function () { rej(new Error('read-fail')); };
+        fr.readAsDataURL(blob);
+      });
+      // 文件名：优先用 URL 里最后一段，否则按 MIME 给个默认名
+      var name = 'image';
+      try {
+        var m = String(src).split('?')[0].split('#')[0].split('/');
+        var last = decodeURIComponent(m[m.length - 1] || '');
+        if (last && last.indexOf('.') > 0) { name = last; }
+      } catch (e2) { }
+      var mime = (blob && blob.type) || 'image/png';
+      if (name.indexOf('.') < 0) {
+        name = name + '.' + (mime.indexOf('jpeg') >= 0 ? 'jpg' :
+          (mime.indexOf('webp') >= 0 ? 'webp' :
+          (mime.indexOf('gif') >= 0 ? 'gif' : 'png')));
+      }
+      return String(dataUrl) + '|' + name;
+    } catch (e) {
+      return 'error:' + (e && e.message ? e.message : 'unknown');
+    }
+  })();`;
+}
+
 export function buildOverlayDismissScript(): string {
   return `(function () {
     try {
@@ -1314,12 +2190,254 @@ export function buildProbeScript(): string {
         }
       } catch (e4) { }
 
+      // 内联编辑态专项诊断。
+      //
+      // 存在的理由：实机「回答带公式/表格时主对话框不收起」只能靠真实 DOM 判定到底
+      // 卡在哪一步，而这个结构无法在本地复现（站点类名是哈希的）。这里一次把关键判据
+      // 全打出来，一次实机取样即可定位：
+      //   · markerTexts  : 主对话框的文字标记到底有没有出现在 DOM 里（一条都没有 →
+      //                    站点改了文案或结构，标记这条路整体失效）
+      //   · pickPath     : applyComposerAutoHide 最后走的是哪条路径（none = 没找到）
+      //   · picked       : 那条路径选中的元素是什么、算不算「已隐藏」
+      //   · editCard     : 编辑卡片是否被认出来（null = 没认出来，那 inlineEdit 必为 false）
+      //   · containers   : 标记文字的可见祖先里，哪些是 fixed/sticky 且贴底
+      //   · fixedBottom  : 全文档 fixed/sticky 且贴底的容器（回答形态是否把它挤出候选）
+      //   · lastInvoke   : applyComposerAutoHide 最近一次被调用的时刻与入参
+      var editDiag = null;
+      try {
+        var de2 = document.documentElement;
+        var vh2 = de2 ? de2.clientHeight : 0;
+        var vw2 = de2 ? de2.clientWidth : 0;
+        function brief(el) {
+          if (!el) { return null; }
+          var cs2 = window.getComputedStyle(el);
+          var r2 = el.getBoundingClientRect();
+          return (el.tagName || '?') + '|' + String(el.className || '').slice(0, 28) +
+            '|pos=' + String(cs2 ? cs2.position : '') +
+            '|' + Math.round(r2.top) + ',' + Math.round(r2.bottom) +
+            '|h' + Math.round(r2.height) + '|w' + Math.round(r2.width) +
+            '|txt=' + String(el.innerText || '').replace(/\s+/g, ' ').slice(0, 18);
+        }
+        // 1) 文字标记是否存在于 DOM
+        var markerHits = [];
+        try {
+          for (var mi = 0; mi < COMPOSER_MARKER_TEXTS.length; mi++) {
+            var mt = COMPOSER_MARKER_TEXTS[mi];
+            var cnt = 0;
+            try { cnt = document.querySelectorAll('body *:contains("' + mt + '")').length; } catch (eQ) { cnt = -1; }
+            if (cnt !== 0) { markerHits.push(mt + ':' + cnt); }
+          }
+        } catch (eM1) { }
+        // 2) 可见的标记元素 → 它的祖先里谁是 fixed/sticky、贴不贴底
+        var containers = [];
+        try {
+          var leaves2 = document.querySelectorAll('body *');
+          var lim2 = leaves2.length < 3500 ? leaves2.length : 3500;
+          for (var li = 0; li < lim2 && containers.length < 8; li++) {
+            var le2 = leaves2[li];
+            if (le2.children && le2.children.length > 0) { continue; }
+            var own2 = String(le2.textContent || '').trim();
+            if (!own2 || own2.length > 30 || !COMPOSER_MARKERS.test(own2)) { continue; }
+            var node2 = le2;
+            var d2 = 0;
+            while (node2 && node2 !== document.body && d2 < 12) {
+              var cs3 = window.getComputedStyle(node2);
+              if (cs3 && (cs3.position === 'fixed' || cs3.position === 'sticky')) {
+                containers.push(brief(node2));
+                break;
+              }
+              node2 = node2.parentElement;
+              d2++;
+            }
+            if (!node2 || node2 === document.body) {
+              containers.push('no-positioned-ancestor:' + brief(le2));
+            }
+          }
+        } catch (eM2) { }
+        // 2) 可见的标记元素 → 它的**完整祖先链**（每层的 position/rect）。
+        // 为什么要把整条链都打出来：实机诊断发现主对话框并**不是**用 position:fixed/sticky
+        // 贴底的 —— containers 与 fixedBottom 都是空数组，说明「向上找固定定位祖先」
+        // 这条路根本无从下手。必须看清它到底靠什么贴在底部，才能写出正确判据。
+        // 同时这也解释了一个陷阱：:contains() 是内核扩展，本设备（ArkWeb 7.0 / Chromium 144）
+        // **不支持**，选择器会直接抛错（见 lastInvoke.hasMarker = "no-selector"），
+        // 所以「文字标记」只能靠全量扫描实现，不能依赖该选择器。
+        var markerChain = [];
+        var markerRaw = [];
+        try {
+          var reSend = /发送消息|深度思考|智能搜索|内容由 AI 生成/;
+          var reTerm = /发送|思考|搜索|生成/;
+          var leaves3 = document.querySelectorAll('body *');
+          var lim3 = leaves3.length < 12000 ? leaves3.length : 12000;
+          for (var l3 = 0; l3 < lim3; l3++) {
+            var le3 = leaves3[l3];
+            if (le3.children && le3.children.length > 0) { continue; }
+            var own3 = String(le3.textContent || '').trim();
+            if (!own3 || own3.length > 30) { continue; }
+            // 原始取样：把「含关键字、但正则没命中」的也记下来 ——
+            // 用来排查「标记文案与预期不符 / 空白字符差异」这类问题
+            if (markerRaw.length < 10 && reTerm.test(own3)) {
+              var rawR = le3.getBoundingClientRect();
+              markerRaw.push(JSON.stringify(own3.slice(0, 20)) + '@' +
+                Math.round(rawR.top) + ',h' + Math.round(rawR.height) +
+                ',cls=' + String(le3.className || '').slice(0, 18) +
+                ',match=' + COMPOSER_MARKERS.test(own3));
+            }
+            if (!reSend.test(own3)) { continue; }
+            var r3 = le3.getBoundingClientRect();
+            if (r3.height <= 0 || r3.width <= 0) { continue; }
+            if (markerChain.length >= 6) { continue; }
+            var chain = [];
+            var n4 = le3;
+            var d4 = 0;
+            while (n4 && n4 !== document.body && d4 < 10) {
+              var c4 = window.getComputedStyle(n4);
+              var rr4 = n4.getBoundingClientRect();
+              chain.push((n4.tagName || '?') + '.' + String(n4.className || '').split(' ')[0] +
+                '(pos=' + String(c4 ? c4.position : '') +
+                ',ofY=' + String(c4 ? c4.overflowY : '').charAt(0) +
+                ',t' + Math.round(rr4.top) + '-b' + Math.round(rr4.bottom) +
+                ',h' + Math.round(rr4.height) + ',w' + Math.round(rr4.width) + ')');
+              n4 = n4.parentElement;
+              d4++;
+            }
+            markerChain.push('TXT[' + own3.slice(0, 12) + '] ' + chain.join(' < '));
+          }
+        } catch (eM4) { }
+
+        // 3) 全文档 fixed/sticky 且贴底的容器（不依赖任何文字标记）
+        var fixedBottom = [];
+        try {
+          // 放宽约束逐个列出：只要 fixed/sticky、宽度过半、高度在 (0, 0.7vh]，
+          // 高度逐条可见 —— 用来判断「主对话框到底算不算固定底栏」。
+          // 编辑态下它的输入框会被换成占位元素，某些判据（尺寸/文字）会失效，
+          // 所以这里连尺寸一起打出来。
+          var allv = document.querySelectorAll('body *');
+          var limv = allv.length < 4000 ? allv.length : 4000;
+          for (var vi = 0; vi < limv && fixedBottom.length < 10; vi++) {
+            var ve = allv[vi];
+            var vcs = window.getComputedStyle(ve);
+            if (!vcs || (vcs.position !== 'fixed' && vcs.position !== 'sticky')) { continue; }
+            if (vcs.display === 'none' || vcs.visibility === 'hidden') { continue; }
+            var vr = ve.getBoundingClientRect();
+            if (vr.width < vw2 * 0.5 || vr.height <= 0 || vr.height > vh2 * 0.7) { continue; }
+            fixedBottom.push(brief(ve) + '|z' + String(vcs.zIndex) +
+              '|bGap' + Math.round(vh2 - vr.bottom));
+          }
+        } catch (eM3) { }
+        // 4) 编辑卡片是否被认出来
+        var ec = window.__dsEditCard;
+        editDiag = {
+          pickPath: String(window.__dsComposerPickPath || ''),
+          hiddenClassOn: window.__dsHiddenCard
+            ? !!window.__dsHiddenCard.classList.contains('${COMPOSER_HIDDEN_CLASS}') : false,
+          picked: brief(window.__dsHiddenCard || window.__dsComposer),
+          editMarked: brief(ec),
+          editAreaChain: (function () {
+            try {
+              var out2 = [];
+              var n3 = window.__dsLastEditFocus;
+              var d3 = 0;
+              while (n3 && n3 !== document.body && d3 < 6) {
+                var c3 = window.getComputedStyle(n3);
+                out2.push((n3.tagName || '?') + '.' + String(n3.className || '').split(' ')[0] +
+                  '(h' + Math.round(n3.getBoundingClientRect().height) +
+                  ',pos' + String(c3 ? c3.position : '') + ')');
+                n3 = n3.parentElement;
+                d3++;
+              }
+              return out2.join(' < ');
+            } catch (eC) { return ''; }
+          })(),
+          markerTexts: markerHits,
+          containers: containers,
+          markerChain: markerChain,
+          markerRaw: markerRaw,
+          textareaCands: (function () {
+            try {
+              var out = [];
+              var tas = document.querySelectorAll('textarea,input,[contenteditable="true"]');
+              for (var ti = 0; ti < tas.length && out.length < 8; ti++) {
+                var ta = tas[ti];
+                var tr = ta.getBoundingClientRect();
+                out.push((ta.tagName || '?') + '|ph=' +
+                  JSON.stringify(String(ta.getAttribute ? (ta.getAttribute('placeholder') || '') : '').slice(0, 18)) +
+                  '|cls=' + String(ta.className || '').slice(0, 22) +
+                  '|' + Math.round(tr.top) + '-' + Math.round(tr.bottom));
+              }
+              return out;
+            } catch (eTa) { return null; }
+          })(),
+          fixedBottom: fixedBottom,
+          // 主对话框的**子树结构**（含输入框外面每一层包装）：实机现在的现象是
+          // 「输入区收起来了，但留了一条含 深度思考/智能搜索/附件/发送 的细长区域」，
+          // 说明隐藏目标是输入框内部那一层，而不是整个底栏。
+          // 必须看清底栏各层的真实尺寸，才能确定该收哪一层、以及用什么判据稳定地选到它。
+          composerTree: (function () {
+            try {
+              var area = document.querySelector('textarea[placeholder]') ||
+                document.querySelector('textarea');
+              if (!area) { return 'no-textarea'; }
+              // 用「分号分隔的扁平字符串」而不是嵌套对象数组：嵌套 JSON 太长且容易被
+              // hilog 截断（实测只能拿到第一个元素），扁平串每层一小段，稳定可读。
+              var out = [];
+              var n = area;
+              var d = 0;
+              while (n && n !== document.body && d < 8) {
+                var cs = n.__cs || window.getComputedStyle(n);
+                var r = n.getBoundingClientRect();
+                out.push((n.tagName || '?') + '.' +
+                  String(n.className || '').split(' ').slice(0, 2).join('.') +
+                  '{p=' + String(cs.position).charAt(0) +
+                  ',o=' + String(cs.overflowY).charAt(0) +
+                  ',d=' + String(cs.display).charAt(0) +
+                  ',t' + Math.round(r.top) + 'b' + Math.round(r.bottom) +
+                  ',h' + Math.round(r.height) + 'w' + Math.round(r.width) + '}');
+                n = n.parentElement;
+                d++;
+              }
+              // 再补一遍「各层祖先的最后一个子元素」：发送按钮 / 工具栏通常挂在那里。
+              // 想确定「该收哪一层」，就必须知道每层里除输入框之外还有什么。
+              var n2 = area.parentElement;
+              var d2 = 0;
+              while (n2 && n2 !== document.body && d2 < 4) {
+                var last = n2.children && n2.children.length
+                  ? n2.children[n2.children.length - 1] : null;
+                if (last && last !== area) {
+                  var lr = last.getBoundingClientRect();
+                  out.push('LAST@L' + d2 + ':' + (last.tagName || '?') + '.' +
+                    String(last.className || '').split(' ').slice(0, 2).join('.') +
+                    '{t' + Math.round(lr.top) + 'b' + Math.round(lr.bottom) +
+                    ',h' + Math.round(lr.height) + 'w' + Math.round(lr.width) + '}' +
+                    '="' + String(last.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 22) + '"');
+                }
+                n2 = n2.parentElement;
+                d2++;
+              }
+              return out.join(' ## ');
+            } catch (eTree) { return 'tree-error'; }
+          })(),
+          // 说明：曾为「去掉免责声明下方那条 28vp 白带」临时加过一个 composerBottom 探针。
+          // 结论已经拿到（截图像素实测：纯白 y=1520~1575，其后才是系统手势导航条；
+          // 而 clientH=vvH=innerH=689 说明应用侧窗口本来就已沉浸、没有底部避让），
+          // 那条白带是站点自己的底部安全间距。经确认保留现状，故该探针已移除，
+          // 不把一次性的排查代码留在发布路径里。
+          //
+          // 同理，曾为「右侧定位历史对话面板」加过一次专项探针，也已移除 ——
+          // 它给出的结论是：该面板**没有任何可识别的 DOM 标记**（不是 dialog/menu、
+          // 没有关闭按钮、右半屏 fixed 容器数为 0），但打开时 history.length 会从 1 变 2。
+          // 基于该结论的改动已按需回退，此处只留结论备查。
+          lastInvoke: window.__dsLastApply || null,
+          autoHideInfo: window.__dsComposerAutoHideInfo || null
+        };
+      } catch (eEd) { }
+
       return JSON.stringify({
         ua: navigator.userAgent,
         mobileToken: /Mobile/i.test(navigator.userAgent),
         histLen: window.history ? window.history.length : -1,
         overlay: overlay,
         ui: ui,
+        editDiag: editDiag,
         innerW: window.innerWidth,
         clientW: de ? de.clientWidth : -1,
         clientH: de ? de.clientHeight : -1,

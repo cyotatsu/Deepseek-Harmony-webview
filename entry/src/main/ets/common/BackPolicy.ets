@@ -1,4 +1,4 @@
-import { OVERLAY_DIALOG, OVERLAY_NONE } from './WebViewport';
+import { OVERLAY_DIALOG, OVERLAY_NONE, OVERLAY_PREVIEW, OVERLAY_CONFIRM } from './WebViewport';
 
 /**
  * 返回手势（侧滑返回 / 返回键）策略。
@@ -31,6 +31,22 @@ export const EXIT_CONFIRM_WINDOW_MS: number = 2000;
 export const BACK_ACTION_DISMISS_MODAL: string = 'dismiss-modal';
 /** 决策：点掉网页自己的瞬时界面（菜单 / 多选模式） */
 export const BACK_ACTION_DISMISS_OVERLAY: string = 'dismiss-overlay';
+/**
+ * 决策：**退出图片/文件预览**，回到对话界面。
+ *
+ * 与 dismiss-overlay 分开的原因：预览的关闭方式更严格（要点遮罩空白或它自己的关闭入口，
+ * 绝不能碰到图片本体），而且**必须先于任何 backward/退出判断** ——
+ * 预览层通常不往历史里 push，若落到 dialog 分支的 `canGoBack ? backward : dismiss-overlay`，
+ * 两条路都关不掉预览，系统随即把这次返回当成退出应用（实机表现：侧滑后直接回桌面）。
+ */
+export const BACK_ACTION_DISMISS_PREVIEW: string = 'dismiss-preview';
+/**
+ * 决策：**关闭确认类弹窗**（删除确认等）。
+ *
+ * 同样必须前置于 backward/退出：确认弹窗一般不 push 历史，
+ * 一旦被判成"无历史 + 在对话根"就会走「再按一次退出桌面」，而用户只是想把弹窗关掉。
+ */
+export const BACK_ACTION_DISMISS_CONFIRM: string = 'dismiss-confirm';
 /** 决策：交给网页后退 */
 export const BACK_ACTION_WEB_BACK: string = 'web-back';
 /** 决策：提示「再按一次返回桌面」 */
@@ -64,6 +80,32 @@ export interface BackContext {
 }
 
 /**
+ * 「点掉网页瞬时界面」失败后的**降级动作**。
+ *
+ * 背景（这是一个真实漏洞的修复）：
+ *   onBackPress 固定返回 true（把返回事件消费掉了），后续动作全靠异步执行。
+ *   当判成 dismiss-overlay 时，若关闭脚本**没点到任何目标**（实测会返回 no-host ——
+ *   因为"取消/关闭"文字按钮可能并不在任何浮层容器内），
+ *   返回键就被白白消费掉了：什么都没发生，用户感知就是「返回失灵」。
+ *
+ * 因此点不掉时必须降级，而不是就此结束：
+ *   · 网页还有历史 ⇒ 走网页后退（至少让用户能退，而不是原地不动）；
+ *   · 没有历史 ⇒ 走「再按一次退出」的确认，而不是静默丢弃。
+ *
+ * @param canGoBack 网页是否还能后退
+ * @param msSinceExitPrompt 距上次「再按一次」提示的毫秒数；负数表示本次会话还没提示过
+ * @returns 降级后的动作（web-back / prompt-exit / exit-now）
+ */
+export function decideOverlayDismissFallback(canGoBack: boolean,
+  msSinceExitPrompt: number): string {
+  if (canGoBack) {
+    return BACK_ACTION_WEB_BACK;
+  }
+  return isWithinExitWindow(msSinceExitPrompt)
+    ? BACK_ACTION_EXIT_NOW : BACK_ACTION_PROMPT_EXIT;
+}
+
+/**
  * 返回手势决策。调用方按返回值执行：
  *   dismiss-modal   → 关掉应用自己的弹层
  *   dismiss-overlay → 点掉网页自己的瞬时界面（菜单 / 多选模式）
@@ -74,6 +116,15 @@ export interface BackContext {
 export function decideBackAction(ctx: BackContext): string {
   if (ctx.modalOpen) {
     return BACK_ACTION_DISMISS_MODAL;
+  }
+  // **预览态优先**：点图片是缩放而非关闭、且多数不 push 历史，
+  // 因此绝不 backward、绝不进入"再按一次退出"的判定。
+  if (ctx.webOverlay === OVERLAY_PREVIEW) {
+    return BACK_ACTION_DISMISS_PREVIEW;
+  }
+  // **确认弹窗优先**：同上。用户按返回的意图是"取消这次操作"。
+  if (ctx.webOverlay === OVERLAY_CONFIRM) {
+    return BACK_ACTION_DISMISS_CONFIRM;
   }
   // 网页**弹窗**：它打开时会 push 一条历史，后退就是它自己的关闭动作 ——
   // 实测「系统设置」弹窗关闭按钮没有 aria-label、且模态弹窗覆盖全屏，

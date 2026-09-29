@@ -10,3 +10,7 @@
 /.clang-tidy
 **/.test
 /.appanalyzer
+
+# 本地签名配置：每台机器的证书路径与密钥各不相同，不应纳入版本控制。
+# 注意只忽略根目录这一份；entry/build-profile.json5 是通用构建配置（无凭据），需要保留。
+/build-profile.json5

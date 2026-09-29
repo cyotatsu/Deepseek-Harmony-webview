@@ -13,6 +13,10 @@
       "value": "重新整理頁面"
     },
     {
+      "name": "a11y_more_actions",
+      "value": "更多操作"
+    },
+    {
       "name": "common_close",
       "value": "關閉"
     },
@@ -117,14 +121,6 @@
       "value": "設定"
     },
     {
-      "name": "settings_refresh_button",
-      "value": "重新整理按鈕"
-    },
-    {
-      "name": "settings_refresh_button_desc",
-      "value": "顯示一鍵重新整理按鈕"
-    },
-    {
       "name": "settings_clear_cache",
       "value": "清理應用程式快取"
     },
@@ -195,6 +191,46 @@
     {
       "name": "refresh_confirm_ok",
       "value": "繼續重新整理"
+    },
+    {
+      "name": "settings_section_fab",
+      "value": "懸浮按鈕"
+    },
+    {
+      "name": "settings_section_misc",
+      "value": "其它"
+    },
+    {
+      "name": "settings_reset_fab",
+      "value": "重設懸浮按鈕位置"
+    },
+    {
+      "name": "settings_reset_fab_desc",
+      "value": "把按鈕放回右上角預設位置"
+    },
+    {
+      "name": "settings_auto_snap",
+      "value": "閒置自動吸附"
+    },
+    {
+      "name": "settings_auto_snap_desc",
+      "value": "停在邊緣附近一段時間後自動貼邊"
+    },
+    {
+      "name": "settings_hide_on_snap",
+      "value": "貼邊時半隱藏"
+    },
+    {
+      "name": "settings_hide_on_snap_desc",
+      "value": "關閉後貼邊時按鈕完整顯示"
+    },
+    {
+      "name": "toast_fab_reset",
+      "value": "已把懸浮按鈕放回預設位置"
+    },
+    {
+      "name": "toast_save_fail",
+      "value": "儲存失敗，請重試"
     }
   ]
 }

@@ -3,6 +3,7 @@ import downloadFilesTest from './DownloadFiles.test';
 import webViewportTest from './WebViewport.test';
 import webInputGuardTest from './WebInputGuard.test';
 import backPolicyTest from './BackPolicy.test';
+import floatingLayoutTest from './FloatingLayout.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -10,4 +11,5 @@ export default function testsuite() {
   webViewportTest();
   webInputGuardTest();
   backPolicyTest();
+  floatingLayoutTest();
 }

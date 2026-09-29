@@ -3,9 +3,12 @@ import {
   decideBackAction, isWithinExitWindow, BackContext,
   EXIT_CONFIRM_WINDOW_MS,
   BACK_ACTION_DISMISS_MODAL, BACK_ACTION_DISMISS_OVERLAY, BACK_ACTION_WEB_BACK,
-  BACK_ACTION_PROMPT_EXIT, BACK_ACTION_EXIT_NOW
+  BACK_ACTION_PROMPT_EXIT, BACK_ACTION_EXIT_NOW,
+  BACK_ACTION_DISMISS_PREVIEW, BACK_ACTION_DISMISS_CONFIRM,
+  decideOverlayDismissFallback
 } from '../main/ets/common/BackPolicy';
-import { OVERLAY_NONE, OVERLAY_DIALOG, OVERLAY_MENU, OVERLAY_CLOSABLE }
+import { OVERLAY_NONE, OVERLAY_DIALOG, OVERLAY_MENU, OVERLAY_CLOSABLE,
+  OVERLAY_PREVIEW, OVERLAY_CONFIRM }
   from '../main/ets/common/WebViewport';
 
 /**
@@ -152,4 +155,131 @@ export default function backPolicyTest() {
       }
     });
   });
+/**
+ * 预览 / 确认弹窗的返回决策。
+ *
+ * 这两类是**实机反馈修复**的重点：用户侧滑时期望"关掉预览/弹窗"，
+ * 而修复前它们被判成 dialog + canGoBack=false，落到"点不掉"的关闭路径，
+ * 系统随即把这次返回当成退出应用 —— 表现就是侧滑后直接回桌面。
+ *
+ * 因此这里用**穷举 canGoBack / onChatRoot**的方式钉死：
+ * 无论历史状态如何，这两类都必须返回"关闭"动作，**绝不能是 backward 或 exit**。
+ */
+describe('preview and confirm back decisions', () => {
+  it('always_dismisses_preview_never_backs_or_exits', 0, () => {
+    const historyStates: Array<boolean> = [true, false];
+    const roots: Array<boolean> = [true, false];
+    for (const canGoBack of historyStates) {
+      for (const onChatRoot of roots) {
+        const action: string = decideBackAction(previewCtx(OVERLAY_PREVIEW, canGoBack, onChatRoot));
+        expect(action).assertEqual(BACK_ACTION_DISMISS_PREVIEW);
+        expect(action === BACK_ACTION_WEB_BACK).assertFalse();
+        expect(action === BACK_ACTION_EXIT_NOW).assertFalse();
+        expect(action === BACK_ACTION_PROMPT_EXIT).assertFalse();
+      }
+    }
+  });
+
+  it('always_dismisses_confirm_dialog_never_backs_or_exits', 0, () => {
+    const historyStates: Array<boolean> = [true, false];
+    const roots: Array<boolean> = [true, false];
+    for (const canGoBack of historyStates) {
+      for (const onChatRoot of roots) {
+        const action: string = decideBackAction(previewCtx(OVERLAY_CONFIRM, canGoBack, onChatRoot));
+        expect(action).assertEqual(BACK_ACTION_DISMISS_CONFIRM);
+        expect(action === BACK_ACTION_WEB_BACK).assertFalse();
+        expect(action === BACK_ACTION_EXIT_NOW).assertFalse();
+      }
+    }
+  });
+
+  // 预览/确认的优先级要**高于**对话根的"再按一次退出"
+  it('takes_precedence_over_the_exit_prompt_on_chat_root', 0, () => {
+    expect(decideBackAction(previewCtx(OVERLAY_PREVIEW, false, true)))
+      .assertEqual(BACK_ACTION_DISMISS_PREVIEW);
+    expect(decideBackAction(previewCtx(OVERLAY_CONFIRM, false, true)))
+      .assertEqual(BACK_ACTION_DISMISS_CONFIRM);
+  });
+
+  // 但应用自己的弹层（上传方式 / 设置）仍应最高优先
+  it('still_lets_the_app_modal_win', 0, () => {
+    const c: BackContext = previewCtx(OVERLAY_PREVIEW, true, true);
+    c.modalOpen = true;
+    expect(decideBackAction(c)).assertEqual(BACK_ACTION_DISMISS_MODAL);
+  });
+
+  // 回归：普通 dialog 的行为不受影响
+  it('keeps_plain_dialog_behaviour_unchanged', 0, () => {
+    expect(decideBackAction(previewCtx(OVERLAY_DIALOG, true, false)))
+      .assertEqual(BACK_ACTION_WEB_BACK);
+    expect(decideBackAction(previewCtx(OVERLAY_DIALOG, false, false)))
+      .assertEqual(BACK_ACTION_DISMISS_OVERLAY);
+  });
+
+  // 回归：菜单 / 多选仍是点掉
+  it('keeps_menu_dismissal_unchanged', 0, () => {
+    expect(decideBackAction(previewCtx(OVERLAY_MENU, false, true)))
+      .assertEqual(BACK_ACTION_DISMISS_OVERLAY);
+    expect(decideBackAction(previewCtx(OVERLAY_CLOSABLE, true, false)))
+      .assertEqual(BACK_ACTION_DISMISS_OVERLAY);
+  });
+
+  // 回归：无弹层 + 对话根仍是"再按一次退出"
+  it('keeps_the_exit_prompt_when_nothing_is_open', 0, () => {
+    expect(decideBackAction(previewCtx(OVERLAY_NONE, false, true)))
+      .assertEqual(BACK_ACTION_PROMPT_EXIT);
+  });
+});
+
+  /**
+   * 「点掉网页瞬时界面」失败后的降级。
+   *
+   * 这是真实漏洞的回归测试：onBackPress 固定消费返回键，若关闭脚本没点中目标
+   *（实测会返回 no-host —— "取消/关闭"文字按钮可能并不在任何浮层容器内），
+   * 原实现只打一条 warn 就结束，返回键被白白吃掉，用户感知为"返回失灵"。
+   * 降级后必须至少让用户能退。
+   */
+  describe('overlay dismiss fallback', () => {
+    it('falls_back_to_web_back_when_history_exists', 0, () => {
+      expect(decideOverlayDismissFallback(true, -1)).assertEqual(BACK_ACTION_WEB_BACK);
+      expect(decideOverlayDismissFallback(true, 0)).assertEqual(BACK_ACTION_WEB_BACK);
+    });
+
+    it('prompts_exit_when_there_is_no_history', 0, () => {
+      expect(decideOverlayDismissFallback(false, -1)).assertEqual(BACK_ACTION_PROMPT_EXIT);
+      expect(decideOverlayDismissFallback(false, EXIT_CONFIRM_WINDOW_MS + 1))
+        .assertEqual(BACK_ACTION_PROMPT_EXIT);
+    });
+
+    it('exits_when_the_confirm_window_is_still_open', 0, () => {
+      expect(decideOverlayDismissFallback(false, 0)).assertEqual(BACK_ACTION_EXIT_NOW);
+      expect(decideOverlayDismissFallback(false, EXIT_CONFIRM_WINDOW_MS - 1))
+        .assertEqual(BACK_ACTION_EXIT_NOW);
+    });
+
+    // 降级绝不能返回"什么都不做"类的动作
+    it('never_returns_a_no_op_action', 0, () => {
+      const actions: Array<string> = [
+        decideOverlayDismissFallback(true, -1),
+        decideOverlayDismissFallback(false, -1),
+        decideOverlayDismissFallback(false, 0)
+      ];
+      for (const a of actions) {
+        expect(a === BACK_ACTION_DISMISS_OVERLAY).assertFalse();
+        expect(a === BACK_ACTION_DISMISS_MODAL).assertFalse();
+        expect(a.length > 0).assertTrue();
+      }
+    });
+  });
+}
+
+/** 构造返回上下文（模块级：ArkTS 不允许嵌套函数） */
+function previewCtx(over: string, canGoBack: boolean, onChatRoot: boolean): BackContext {
+  return {
+    modalOpen: false,
+    webOverlay: over,
+    onChatRoot: onChatRoot,
+    canGoBack: canGoBack,
+    msSinceExitPrompt: -1
+  };
 }

@@ -13,6 +13,10 @@
       "value": "刷新页面"
     },
     {
+      "name": "a11y_more_actions",
+      "value": "更多操作"
+    },
+    {
       "name": "common_close",
       "value": "关闭"
     },
@@ -117,14 +121,6 @@
       "value": "设置"
     },
     {
-      "name": "settings_refresh_button",
-      "value": "刷新按钮"
-    },
-    {
-      "name": "settings_refresh_button_desc",
-      "value": "显示一键刷新按钮"
-    },
-    {
       "name": "settings_clear_cache",
       "value": "清理应用缓存"
     },
@@ -195,6 +191,46 @@
     {
       "name": "refresh_confirm_ok",
       "value": "继续刷新"
+    },
+    {
+      "name": "settings_section_fab",
+      "value": "悬浮按钮"
+    },
+    {
+      "name": "settings_section_misc",
+      "value": "其它"
+    },
+    {
+      "name": "settings_reset_fab",
+      "value": "重置悬浮按钮位置"
+    },
+    {
+      "name": "settings_reset_fab_desc",
+      "value": "把按钮放回右上角默认位置"
+    },
+    {
+      "name": "settings_auto_snap",
+      "value": "空闲自动吸附"
+    },
+    {
+      "name": "settings_auto_snap_desc",
+      "value": "停在边缘附近一段时间后自动贴边"
+    },
+    {
+      "name": "settings_hide_on_snap",
+      "value": "贴边时半隐藏"
+    },
+    {
+      "name": "settings_hide_on_snap_desc",
+      "value": "关闭后贴边时按钮完整显示"
+    },
+    {
+      "name": "toast_fab_reset",
+      "value": "已把悬浮按钮放回默认位置"
+    },
+    {
+      "name": "toast_save_fail",
+      "value": "保存失败，请重试"
     }
   ]
 }

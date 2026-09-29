@@ -5,7 +5,7 @@ import { window } from '@kit.ArkUI';
 import { url } from '@kit.ArkTS';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { i18n } from '@kit.LocalizationKit';
-import { DEEPSEEK_URL, DEEPSEEK_HOST } from '../common/AppConfig';
+import { DEEPSEEK_URL, DEEPSEEK_HOST, CUSTOM_SCHEME } from '../common/AppConfig';
 import { cleanupPhotoTempFiles } from '../common/PhotoTempFiles';
 import { cleanupDownloadTempFiles } from '../common/DownloadFiles';
 
@@ -95,9 +95,9 @@ export default class EntryAbility extends UIAbility {
     }
   }
 
+
   onWindowStageCreate(windowStage: window.WindowStage): void {
     hilog.info(DOMAIN, TAG, 'Ability onWindowStageCreate');
-
     windowStage.loadContent('pages/Index', (err) => {
       // err 可能为 undefined（该回调在部分版本下成功时传 undefined），
       // 直接访问 err.code 会抛异常，导致后面的窗口初始化整段被跳过。
@@ -106,6 +106,11 @@ export default class EntryAbility extends UIAbility {
         return;
       }
       hilog.info(DOMAIN, TAG, 'Succeeded in loading the content.');
+
+      // 说明：曾尝试把悬浮条搬进独立 overlay 窗口（createSubWindow）来彻底消除
+      // 「触摸穿透到网页、触发网页文本选择放大镜」的问题，窗口本身能创建成功，
+      // 但子窗口背景无法做成透明（整屏白板）且与 FloatingBar 的整屏坐标模型不匹配，
+      // 未能交付，已回退到同窗口方案（见 components/FloatingBar.ets 的说明）。
 
       // 设置窗口全屏沉浸：内容延伸至状态栏后方，状态栏透明
       mainWindowClass = windowStage.getMainWindowSync();
@@ -225,8 +230,15 @@ export default class EntryAbility extends UIAbility {
   }
 
   /**
-   * 解析并处理Deep Link URL
-   * 支持的URL格式：https://chat.deepseek.com/share/...
+   * 解析并处理Deep Link URL。
+   *
+   * 支持两类写法，都会被归一成 `https://chat.deepseek.com/share/...` 再交给 WebView：
+   *   1. `https://chat.deepseek.com/share/...` —— 系统/其它应用直接投递的分享链接；
+   *   2. 自定义 scheme（见 module.json5 里的 `deepseek` skill）：
+   *      · `deepseek://share/<id>`                     —— 短写
+   *      · `deepseek://chat.deepseek.com/share/<id>`   —— 带上原域名
+   *      自定义 scheme 不要求域名校验，是「浏览器或其它应用提示用本应用打开」时
+   *      唯一可行的通路；归一化后与分享链接完全等价，页面侧无需区分。
    */
   private handleDeepLink(want: Want): void {
     const uri = want?.uri;
@@ -237,14 +249,37 @@ export default class EntryAbility extends UIAbility {
     hilog.info(DOMAIN, TAG, 'Received DeepLink URI: %{private}s', uri);
 
     try {
-      const urlObject = url.URL.parseURL(uri);
-      const host = urlObject.hostname;
-      const path = urlObject.pathname;
+      const urlObject: url.URL = url.URL.parseURL(uri);
+      const host: string = urlObject.hostname;
+      const path: string = urlObject.pathname || '';
+      // @ohos.url 的 URL 类没有 scheme 字段，自己从 `scheme://` 前截取。
+      const sep: number = uri.indexOf('://');
+      const scheme: string = (sep > 0 ? uri.substring(0, sep) : '').toLowerCase();
 
-      // 处理DeepSeek分享链接
+      // 1) 标准 https 分享链接
       if (host === DEEPSEEK_HOST && path.startsWith('/share')) {
         hilog.info(DOMAIN, TAG, 'DeepSeek share link detected, navigating to: %{private}s', uri);
         AppStorage.setOrCreate('deepLinkUrl', uri);
+        return;
+      }
+
+      // 2) 自定义 scheme：归一化成标准分享链接
+      //    两种写法的解析结果不同，要分别处理：
+      //      · deepseek://share/<id>                    → host=share,        path=/<id>
+      //      · deepseek://chat.deepseek.com/share/<id>  → host=chat.deepseek.com, path=/share/<id>
+      if (scheme === CUSTOM_SCHEME) {
+        let normalized: string = '';
+        if (host === 'share') {
+          normalized = `https://${DEEPSEEK_HOST}/share${path}`;
+        } else if ((host === DEEPSEEK_HOST || host === '') && path.startsWith('/share')) {
+          normalized = `https://${DEEPSEEK_HOST}${path}`;
+        }
+        if (normalized.length > 0) {
+          hilog.info(DOMAIN, TAG, 'Custom scheme share link normalized: %{private}s', normalized);
+          AppStorage.setOrCreate('deepLinkUrl', normalized);
+        } else {
+          hilog.warn(DOMAIN, TAG, 'Custom scheme link not recognized, ignored');
+        }
       }
     } catch (err) {
       hilog.error(DOMAIN, TAG, 'Failed to parse DeepLink URI');

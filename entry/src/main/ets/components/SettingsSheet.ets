@@ -7,12 +7,45 @@
  */
 @Component
 export struct SettingsSheet {
-  /** 刷新按钮开关的当前值（单向传入，变更通过 onToggleRefresh 回传） */
-  @Prop refreshButtonEnabled: boolean = true;
-  onToggleRefresh: (enabled: boolean) => void = () => {};
+  // ── 悬浮按钮相关（单向传入 + 回调回传，面板自身不持有状态）──
+  /** 左右贴边时是否半隐藏 */
+  @Prop hideOnSnap: boolean = true;
+  /** 是否启用空闲自动吸附 */
+  @Prop autoSnap: boolean = true;
+  /** 重置悬浮按钮位置 */
+  onResetFabPosition: () => void = () => {};
+  onToggleHideOnSnap: (enabled: boolean) => void = () => {};
+  onToggleAutoSnap: (enabled: boolean) => void = () => {};
+
   onClearCache: () => void = () => {};
   onOpenFeedback: () => void = () => {};
   onClose: () => void = () => {};
+
+  /** 分组小标题（设置项多起来后需要分组，否则一排文字看不出层次） */
+  @Builder
+  sectionTitle(text: Resource) {
+    Text(text)
+      .fontSize(12)
+      .fontColor($r('app.color.text_secondary'))
+      .width('100%')
+      .padding({ left: 20, right: 20, top: 18, bottom: 6 })
+  }
+
+  /** 可点击的设置项行（标题 + 说明 + 可选右侧内容由调用方给出） */
+  @Builder
+  actionRow(title: Resource, desc: Resource) {
+    Column() {
+      Text(title)
+        .fontSize(15)
+        .fontColor($r('app.color.text_primary'))
+      Text(desc)
+        .fontSize(12)
+        .fontColor($r('app.color.text_secondary'))
+        .margin({ top: 3 })
+    }
+    .alignItems(HorizontalAlign.Start)
+    .layoutWeight(1)
+  }
 
   build() {
     Column() {
@@ -60,30 +93,54 @@ export struct SettingsSheet {
 
       Divider().color($r('app.color.progress_track')).opacity(0.15)
 
-      // 刷新按钮开关
-      Row() {
-        Column() {
-          Text($r('app.string.settings_refresh_button'))
-            .fontSize(15)
-            .fontColor($r('app.color.text_primary'))
-          Text($r('app.string.settings_refresh_button_desc'))
-            .fontSize(12)
-            .fontColor($r('app.color.text_secondary'))
-            .margin({ top: 3 })
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
+      // 说明：这里原有一个「刷新按钮」开关，用于控制悬浮条是否显示刷新按钮。
+      // 现已移除 —— 刷新改为常显（见 components/FloatingBar.ets 的子菜单顺序）。
+      // 若将来要恢复可配置，需要同时带回 @Prop refreshButtonEnabled 与 onToggleRefresh，
+      // 以及 Index.ets 里的偏好读写（UiPrefs 的 isRefreshButtonEnabled/setRefreshButtonEnabled）。
 
-        Toggle({ type: ToggleType.Switch, isOn: this.refreshButtonEnabled })
-          .onChange((isOn: boolean) => {
-            this.onToggleRefresh(isOn);
-          })
+      // ── 悬浮按钮 ──
+      this.sectionTitle($r('app.string.settings_section_fab'))
+
+      // 重置悬浮按钮位置：按钮可能被拖到偏下/与输入框重叠，这里给一个恢复入口
+      Row() {
+        this.actionRow($r('app.string.settings_reset_fab'), $r('app.string.settings_reset_fab_desc'))
+        SymbolGlyph($r('sys.symbol.arrow_counterclockwise'))
+          .fontSize(16)
+          .fontColor([$r('app.color.text_secondary')])
       }
       .width('100%')
-      .padding({ left: 20, right: 20, top: 16, bottom: 16 })
+      .padding({ left: 20, right: 20, top: 12, bottom: 12 })
+      .alignItems(VerticalAlign.Center)
+      .onClick(() => this.onResetFabPosition())
+
+      Divider().color($r('app.color.progress_track')).opacity(0.15)
+
+      // 空闲自动吸附开关
+      Row() {
+        this.actionRow($r('app.string.settings_auto_snap'), $r('app.string.settings_auto_snap_desc'))
+        Toggle({ type: ToggleType.Switch, isOn: this.autoSnap })
+          .onChange((isOn: boolean) => this.onToggleAutoSnap(isOn))
+      }
+      .width('100%')
+      .padding({ left: 20, right: 20, top: 12, bottom: 12 })
       .alignItems(VerticalAlign.Center)
 
       Divider().color($r('app.color.progress_track')).opacity(0.15)
+
+      // 贴边半隐藏开关
+      Row() {
+        this.actionRow($r('app.string.settings_hide_on_snap'), $r('app.string.settings_hide_on_snap_desc'))
+        Toggle({ type: ToggleType.Switch, isOn: this.hideOnSnap })
+          .onChange((isOn: boolean) => this.onToggleHideOnSnap(isOn))
+      }
+      .width('100%')
+      .padding({ left: 20, right: 20, top: 12, bottom: 12 })
+      .alignItems(VerticalAlign.Center)
+
+      Divider().color($r('app.color.progress_track')).opacity(0.15)
+
+      // ── 其它 ──
+      this.sectionTitle($r('app.string.settings_section_misc'))
 
       // 清理应用缓存
       Row() {

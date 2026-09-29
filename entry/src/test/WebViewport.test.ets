@@ -3,11 +3,14 @@ import { buildUserAgent, isMobileUa, buildViewportFixScript, buildResizeNotifySc
   buildProbeScript, buildOverlayProbeScript, buildOverlayDismissScript, parseOverlayKind,
   isDismissClicked, buildComposerAutoHideScript, buildKeyboardStateScript, buildRetryFocusScript,
   COMPOSER_HIDDEN_CLASS, EDITOR_CARD_CLASS, EDITOR_MAX_VAR, EDITOR_MAX_RATIO, EDITOR_MAX_PX,
+  EDITOR_ACTION_ROW_CLASS, EDITOR_BOTTOM_PAD_VAR, EDITOR_IMAGE_MAX_VH, EDITOR_MIN_PX,
+  buildEditorCardCss,
   OVERLAY_NONE, OVERLAY_DIALOG, OVERLAY_MENU, OVERLAY_CLOSABLE,
   VIEWPORT_STYLE_ID, EDITABLE_SELECTOR, MOBILE_UA_TOKEN,
   COMPOSER_CAP_VAR, COMPOSER_FALLBACK_VH, COMPOSER_MAX_PX, COMPOSER_MIN_PX,
   COMPOSER_MAX_RATIO, COMPOSER_UNSTRETCH_CSS,
-  computeComposerCapPx } from '../main/ets/common/WebViewport';
+  COMPOSER_MARKER_TEXTS, buildComposerMarkerPattern,
+  computeComposerCapPx, computeEditorCapPx } from '../main/ets/common/WebViewport';
 
 /**
  * common/WebViewport 的本地（宿主）单元测试。
@@ -241,9 +244,13 @@ export default function webViewportTest() {
       expect(script).assertContain('关闭');
       // 标签必须是全等匹配（^…$）：否则「取消订阅」这类文案会被当成关闭入口
       expect(script).assertContain('^(');
-      // 文字按钮这一路：只认叶子节点 + 按钮尺寸，避免误判成页面里的普通文案
+      // 文字按钮这一路：innerText 全等 + 按钮尺寸上限，避免误判成页面里的普通文案。
+      //
+      // ⚠️ 这里**不再**断言「必须是无子节点的叶子」：实机取证（删除确认弹窗）显示
+      //    按钮实际是 DIV(含 2 个子节点) > SPAN，要求叶子会把按钮整个漏掉 ——
+      //    原实现正是因此没能识别出确认弹窗。改用 findTextButton 统一查找。
       expect(script).assertContain('innerText');
-      expect(script).assertContain('children.length > 0');
+      expect(script).assertContain('findTextButton');
       expect(script).assertContain('320');
     });
 
@@ -331,38 +338,167 @@ export default function webViewportTest() {
       expect(script).assertContain('cardPos');
     });
 
-    // 关键回归（键盘闪现）：绝不能隐藏「当前聚焦元素所在的容器」——
-    // 那会让正在编辑的输入框立刻失焦、键盘随即收起（实机复现：hide 后约 35ms 键盘变 0）。
-    // 容器里同时装着编辑卡片与主对话框时，只隐藏「不含焦点且贴底」的那个子元素。
-    it('never_hides_a_container_holding_the_focused_element', 0, () => {
-      expect(script).assertContain('containsActive');
-      expect(script).assertContain('hideTargetFor');
-      // 已经错误隐藏过的要能纠正回来
-      expect(script).assertContain('__dsHiddenCard');
-      // 底部固定容器只认 fixed / sticky，避免把消息气泡里的编辑卡片当成主对话框
-      expect(script).assertContain("position === 'fixed'");
-      expect(script).assertContain("position === 'sticky'");
-    });
-
     // 问题一：含图片 + 长文本时，卡片的取消/保存按钮会被挤出可视区。
-    // 做法是标记「内联编辑卡片」并用 CSS 限高（列向 flex，文本域自己滚动、按钮留在卡内）
+    // 做法是标记「内联编辑卡片」限高，并把**按钮行**单独标类 -> CSS 给它 sticky 贴底。
     it('marks_the_inline_edit_card_and_keeps_buttons_visible', 0, () => {
       expect(script).assertContain(EDITOR_CARD_CLASS);
       expect(script).assertContain('findEditCard');
-      // 找到卡片后按「贴底对齐」滚动 —— 按钮行在卡片下方，居中反而可能被键盘挡住
+      expect(script).assertContain('findActionRow');
+      expect(script).assertContain(EDITOR_ACTION_ROW_CLASS);
       expect(script).assertContain("block: 'end'");
     });
 
-    // 问题二：编辑态是异步渲染的，程序化 focus 可能被顶掉 → 焦点丢了要补回来；
+    // sticky 规则必须真的进样式表，且**不能**再带上列向 flex 那套（历史回归：
+    // 卡片内部被撑开，长文本时文本框下方留一大片空白）
+    it('injects_the_sticky_action_row_rule_without_flex', 0, () => {
+      const css: string = buildEditorCardCss();
+      expect(css).assertContain('div.' + EDITOR_ACTION_ROW_CLASS);
+      expect(css).assertContain('position:sticky !important');
+      expect(css).assertContain('bottom:0 !important');
+      expect(css).assertContain(EDITOR_BOTTOM_PAD_VAR);
+      expect(css).assertContain('max-height:var(' + EDITOR_MAX_VAR);
+      expect(css).assertContain('overflow-y:auto !important');
+      expect(css.indexOf('display:flex')).assertEqual(-1);
+      expect(css.indexOf('flex:1 1 auto')).assertEqual(-1);
+      const fix: string = buildViewportFixScript(768);
+      expect(fix).assertContain('position:sticky');
+      expect(fix).assertContain(EDITOR_ACTION_ROW_CLASS);
+    });
+
+    // 卡片在「第一次滚完之后」还会因为图片加载完 / 长文本贴进来而继续长高，
+    // 那时必须重新贴底对齐，否则按钮又被挤出可视区。但**只认长高**：
+    // 收起键盘只变小，因此不会重蹈「一收键盘就坍塌到底部」。
+    it('realigns_the_card_only_when_it_grows', 0, () => {
+      expect(script).assertContain('cardGrew');
+      expect(script).assertContain('realignEditCardIfGrown');
+      expect(script).assertContain('__dsEditCardMetric');
+      expect(script).assertContain('__dsEditScrolled');
+      expect(script).assertContain('window.__dsKeyboardUp');
+      expect(script).assertContain('markEditCardNow');
+    });
+
+    // 问题二：编辑态是异步渲染的，程序化 focus 可能被顶掉 -> 焦点丢了要补回来；
     // 同时把焦点事件上报给应用侧，由应用侧在键盘没弹起时兜底
     it('heals_lost_focus_and_reports_it_to_the_app', 0, () => {
       expect(script).assertContain('scheduleFocusHeal');
       expect(script).assertContain('__dsLastEditFocus');
       expect(script).assertContain('__dsFocus:');
       expect(script).assertContain('refocus');
-      // 只在焦点真的丢了、且没有别的可编辑元素接管时才补，避免打乱光标
       expect(script).assertContain('document.activeElement');
     });
+
+    // 回归：旧版补焦只认「当初那个元素」，站点一旦把文本域节点换掉，
+    // document.contains 立刻为 false，后面几次补焦全部直接 return —— 焦点再也不回来。
+    // 现在必须每次都重新查卡片里的活输入框。
+    it('re_queries_the_live_editable_when_the_node_is_replaced', 0, () => {
+      expect(script).assertContain('currentEditable');
+      expect(script).assertContain('__dsEditSession');
+      expect(script).assertContain('__dsEditSubmitAt');
+      expect(script).assertContain("return 'submitted'");
+      expect(buildRetryFocusScript()).assertContain('__dsRetryEditFocus');
+    });
+
+    // 关键回归（真机抓到）：编辑过程中隐藏目标**换过一次**，于是**两个元素**
+    // 先后都带上了隐藏类。旧代码恢复时只 remove 引用记的那一个，另一个永久留在
+    // display:none —— 现象就是「点一次修改，主对话框再也回不来」。
+    // 现在恢复一律以 DOM 为准：谁带着这个类就拆谁。
+    it('clears_every_hidden_class_not_just_the_remembered_one', 0, () => {
+      expect(script).assertContain('clearHiddenClassEverywhere');
+      expect(script).assertContain('querySelectorAll(\'.' + COMPOSER_HIDDEN_CLASS + '\')');
+      expect(script).assertContain('if (!keyboardUp) {');
+      const early: number = script.indexOf('if (!keyboardUp && !window.__dsWasInlineEdit)');
+      const sweep: number = script.indexOf('clearHiddenClassEverywhere();', early);
+      expect(early > 0 && sweep > early).assertTrue();
+      expect(script.indexOf('!keyboardUp && window.__dsHiddenCard && document.contains')).assertEqual(-1);
+    });
+
+    // 键盘状态推送里还要有一道安全网：键盘收起时强制扫掉所有隐藏类。
+    it('sweeps_hidden_classes_on_the_keyboard_down_push', 0, () => {
+      const down: string = buildKeyboardStateScript(false);
+      const up: string = buildKeyboardStateScript(true);
+      expect(down).assertContain("querySelectorAll('." + COMPOSER_HIDDEN_CLASS + "')");
+      expect(down).assertContain('swept=');
+      expect(up).assertContain('swept=');
+      expect(up).assertContain('window.__dsKeyboardUp = true');
+    });
+
+    // 「键盘收起 ⇒ 主对话框必须显示」是一条无条件硬保证，且只看 latch，
+    // 不看「卡片此刻在不在」——否则键盘信号晚到会导致卡片不被标记。
+    it('always_restores_the_composer_when_the_keyboard_is_down', 0, () => {
+      expect(script).assertContain('if (!keyboardUp) {');
+      expect(script).assertContain('clearHiddenClassEverywhere();');
+      expect(script).assertContain('__dsWasInlineEdit');
+      expect(script).assertContain('if (!keyboardUp && !window.__dsWasInlineEdit)');
+      expect(script).assertContain('if (window.__dsHiddenCard && containsActive(window.__dsHiddenCard))');
+    });
+
+    it('latches_inline_edit_until_the_keyboard_goes_down', 0, () => {
+      expect(script).assertContain('if (inlineEdit) { window.__dsWasInlineEdit = true; }');
+      expect(script).assertContain('else if (!keyboardUp) { window.__dsWasInlineEdit = false; }');
+    });
+
+    // 关键：主输入框自己也是可编辑元素，只有「焦点不在主对话框里」才算内联编辑。
+    // 判据一度写成「祖先链上有没有 fixed/sticky」，而**消息列表本身就是 sticky**，
+    // 于是编辑卡片被误判成主对话框、inlineEdit 永远为 false。
+    it('only_hides_while_the_focus_is_outside_the_composer', 0, () => {
+      expect(script).assertContain('isInComposer');
+      expect(script).assertContain('inlineEdit');
+      expect(script).assertContain('activeElement');
+      expect(script).assertContain('var inlineEdit = keyboardUp && !!editCard;');
+      expect(script.indexOf('var inlineEdit = keyboardUp && !isInBottomCard')).assertEqual(-1);
+      expect(script).assertContain('COMPOSER_MARKER_TEXTS');
+      expect(script.indexOf('深度思考') >= 0).assertTrue();
+    });
+
+    // 主对话框的文字标记：与回答内容无关，因此公式 / 表格不会影响识别。
+    it('exposes_composer_text_markers_from_a_single_source', 0, () => {
+      expect(COMPOSER_MARKER_TEXTS.length > 0).assertTrue();
+      expect(COMPOSER_MARKER_TEXTS.indexOf('深度思考') >= 0).assertTrue();
+      expect(COMPOSER_MARKER_TEXTS.indexOf('智能搜索') >= 0).assertTrue();
+      const pattern: string = buildComposerMarkerPattern();
+      expect(pattern).assertContain('深度思考');
+      const s: string = buildComposerAutoHideScript();
+      expect(s).assertContain(pattern);
+      expect(s).assertContain('COMPOSER_MARKER_TEXTS = [');
+      expect(s).assertContain('eSel');
+      expect(s).assertContain('all.length < 6000');
+    });
+
+    // 实机回归：右侧侧栏抽屉是 position:fixed 且占满整个内容高度，
+    // 消息列表也能有 601px（可视 689）。收敛容器必须卡高度护栏，并用
+    // 「这一层是否同时装着工具栏」这个语义判据来定层。
+    it('never_picks_a_full_height_fixed_drawer_as_the_composer', 0, () => {
+      expect(script).assertContain('vh * 0.45');
+      expect(script).assertContain('containerOfMarker');
+      expect(script).assertContain('r.height > vh * 0.45');
+      expect(script).assertContain('subtreeHasMarkerText');
+      expect(script).assertContain('parentTextIncludes');
+    });
+
+    // 主输入框的占位文案是「给 DeepSeek 发送消息 」（实测带尾随空格），
+    // 而且编辑历史消息时它依然在 DOM 里 —— 这是最可靠、也与回答形态无关的锚点。
+    it('anchors_the_composer_on_the_input_placeholder', 0, () => {
+      expect(script).assertContain('findComposerByPlaceholder');
+      expect(script).assertContain("getAttribute('placeholder')");
+      expect(script).assertContain('aria-label');
+      expect(script.indexOf('ph.indexOf(t) >= 0') >= 0).assertTrue();
+    });
+
+    // 关键（键盘闪现）：绝不能隐藏「当前聚焦元素所在的容器」——
+    // 那会让正在编辑的输入框立刻失焦、键盘随即收起。
+    it('never_hides_a_container_holding_the_focused_element', 0, () => {
+      expect(script).assertContain('containsActive');
+      expect(script).assertContain('pickComposer');
+      expect(script).assertContain('if (containsActive(el)) { return false; }');
+      expect(script).assertContain('el.contains(editCard) || editCard.contains(el)');
+      expect(script).assertContain('__dsHiddenCard');
+      expect(script).assertContain("position === 'fixed'");
+      expect(script).assertContain("position === 'sticky'");
+      expect(script.indexOf('function hideTargetFor')).assertEqual(-1);
+      expect(script.indexOf('hideTargetFor(')).assertEqual(-1);
+    });
+
+    // 问题二：编辑态是异步渲染的，程序化 focus 可能被后到的 DOM 变更顶掉。
 
     // 点卡片空白处也要能开始编辑（用户的手指天然带 user activation，键盘能正常拉起）
     // 收起态点击卡片不再坍塌、也不再需要点两次：脚本不再挂 pointerdown 去补聚焦

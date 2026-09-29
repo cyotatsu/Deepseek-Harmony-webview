@@ -12,6 +12,17 @@ const KEY_BTN_DY: string = 'refresh_btn_dy';
 const KEY_HINT_SHOWN: string = 'refresh_btn_hint_shown';
 const KEY_REFRESH_ENABLED: string = 'refresh_btn_enabled';
 const KEY_REFRESH_CONFIRM_SKIPPED: string = 'refresh_confirm_skipped';
+/**
+ * 悬浮按钮上次是否处于「贴边」状态。
+ *
+ * 用途：重载后恢复位置时，只有上次确实贴边才重新贴边；
+ * 若用户把按钮停在中间（自由悬停），重载后也应停在中间。
+ */
+const KEY_BTN_SNAPPED: string = 'refresh_btn_snapped';
+/** 左右贴边时是否半隐藏（默认 true：只露一小半，省屏幕空间） */
+const KEY_FAB_HIDE_ON_SNAP: string = 'fab_hide_on_snap';
+/** 是否启用空闲自动吸附（默认 true：停在边缘附近一段时间后自动贴边） */
+const KEY_FAB_AUTO_SNAP: string = 'fab_auto_snap';
 
 function openStore(context: common.Context): preferences.Preferences | null {
   try {
@@ -104,8 +115,7 @@ export function isRefreshButtonEnabled(context: common.Context): boolean {
 }
 
 /** 保存刷新按钮的启用状态 */
-export function setRefreshButtonEnabled(context: common.Context, enabled: boolean): void {
-  const store: preferences.Preferences | null = openStore(context);
+export function setRefreshButtonEnabled(context: common.Context, enabled: boolean): void {  const store: preferences.Preferences | null = openStore(context);
   if (!store) {
     return;
   }
@@ -148,5 +158,99 @@ export function setRefreshConfirmSkipped(context: common.Context, skipped: boole
     });
   } catch (err) {
     hilog.warn(DOMAIN, TAG, 'Failed to save refresh confirm skipped flag');
+  }
+}
+
+/**
+ * 读取悬浮按钮上次是否处于贴边状态。
+ * 读取失败时返回 true（按贴边处理），与默认位置一致。
+ */
+export function loadRefreshButtonSnapped(context: common.Context): boolean {
+  const store: preferences.Preferences | null = openStore(context);
+  if (!store) {
+    return true;
+  }
+  try {
+    return store.getSync(KEY_BTN_SNAPPED, true) as boolean;
+  } catch (err) {
+    return true;
+  }
+}
+
+/** 保存悬浮按钮的贴边状态（拖动松手时调用） */
+export function setRefreshButtonSnapped(context: common.Context, snapped: boolean): void {
+  const store: preferences.Preferences | null = openStore(context);
+  if (!store) {
+    return;
+  }
+  try {
+    store.putSync(KEY_BTN_SNAPPED, snapped);
+    store.flush().catch(() => {
+      hilog.warn(DOMAIN, TAG, 'Failed to flush floating button snapped flag');
+    });
+  } catch (err) {
+    hilog.warn(DOMAIN, TAG, 'Failed to save floating button snapped flag');
+  }
+}
+
+/**
+ * 左右贴边时是否半隐藏。读取失败按 true（与历史行为一致）。
+ */
+export function isFloatingHideOnSnap(context: common.Context): boolean {
+  const store: preferences.Preferences | null = openStore(context);
+  if (!store) {
+    return true;
+  }
+  try {
+    return store.getSync(KEY_FAB_HIDE_ON_SNAP, true) as boolean;
+  } catch (err) {
+    return true;
+  }
+}
+
+/** 保存「贴边半隐藏」开关 */
+export function setFloatingHideOnSnap(context: common.Context, enabled: boolean): void {
+  const store: preferences.Preferences | null = openStore(context);
+  if (!store) {
+    return;
+  }
+  try {
+    store.putSync(KEY_FAB_HIDE_ON_SNAP, enabled);
+    store.flush().catch(() => {
+      hilog.warn(DOMAIN, TAG, 'Failed to flush floating hide-on-snap flag');
+    });
+  } catch (err) {
+    hilog.warn(DOMAIN, TAG, 'Failed to save floating hide-on-snap flag');
+  }
+}
+
+/**
+ * 是否启用空闲自动吸附。读取失败按 true（与历史行为一致）。
+ */
+export function isFloatingAutoSnap(context: common.Context): boolean {
+  const store: preferences.Preferences | null = openStore(context);
+  if (!store) {
+    return true;
+  }
+  try {
+    return store.getSync(KEY_FAB_AUTO_SNAP, true) as boolean;
+  } catch (err) {
+    return true;
+  }
+}
+
+/** 保存「空闲自动吸附」开关 */
+export function setFloatingAutoSnap(context: common.Context, enabled: boolean): void {
+  const store: preferences.Preferences | null = openStore(context);
+  if (!store) {
+    return;
+  }
+  try {
+    store.putSync(KEY_FAB_AUTO_SNAP, enabled);
+    store.flush().catch(() => {
+      hilog.warn(DOMAIN, TAG, 'Failed to flush floating auto-snap flag');
+    });
+  } catch (err) {
+    hilog.warn(DOMAIN, TAG, 'Failed to save floating auto-snap flag');
   }
 }
