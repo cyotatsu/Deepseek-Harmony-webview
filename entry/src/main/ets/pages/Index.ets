@@ -39,8 +39,11 @@ import { SettingsSheet } from '../components/SettingsSheet';
 import { UploadSheet } from '../components/UploadSheet';
 import { isRefreshConfirmSkipped, setRefreshConfirmSkipped,
   isFloatingHideOnSnap, setFloatingHideOnSnap,
-  isFloatingAutoSnap, setFloatingAutoSnap } from '../common/UiPrefs';
-import { KEY_FAB_HIDE_ON_SNAP, KEY_FAB_AUTO_SNAP, KEY_FAB_RESET_POS } from '../common/AppConfig';
+  isFloatingAutoSnap, setFloatingAutoSnap,
+  loadTextZoom, saveTextZoom } from '../common/UiPrefs';
+import { KEY_FAB_HIDE_ON_SNAP, KEY_FAB_AUTO_SNAP, KEY_FAB_RESET_POS,
+  KEY_WEB_TEXT_ZOOM } from '../common/AppConfig';
+import { clampTextZoom, TEXT_ZOOM_DEFAULT } from '../common/FontZoom';
 
 const DOMAIN = 0x0001;
 const TAG = 'DeepSeekIndex';
@@ -239,6 +242,14 @@ struct Index {
           .mixedMode(MixedMode.None)  // 官方安全默认：禁止加载 HTTP/HTTPS 混合内容
           .imageAccess(true)
           .zoomAccess(true)
+          // 网页文字缩放：在设置面板（齿轮 → 显示 → 字体大小）里手动调节，默认 100%。
+          //
+          // 用内核的 textZoomRatio 而不是往网页里注入 font-size 覆盖：
+          //   · 内核只放大/缩小文字，图片、间距、表格结构都不动，不会把站点排版搞乱；
+          //   · 站点自己的样式表随时可能改类名，注入 CSS 的写法迟早会失效；
+          //   · 该属性在页面导航后依然生效，不需每次重新注入。
+          // 绑定的是 AppStorage 里的值，面板里拖动滑块即可实时看到效果。
+          .textZoomRatio(this.webTextZoom)
           // ⚠️ 关键：显式开启 meta viewport 解析。
           //
           // 内核的默认规则是「UA 不含 Mobile 字段 → 禁用 viewport」。手机默认 UA 含
@@ -1069,6 +1080,15 @@ struct Index {
   @StorageLink(KEY_FAB_RESET_POS) fabResetPos: boolean = false;
 
   /**
+   * 网页文字缩放百分比（100 = 内核默认）。
+   *
+   * 用 @StorageLink 而不是普通 @State：设置面板（SettingsSheet）里的滑块通过
+   * @Link 与之双向绑定，拖动时要立刻反映到 Web 组件的 textZoomRatio 上 ——
+   * 走 AppStorage 是二者唯一的共享通道，且与「悬浮条设置」的既有做法一致。
+   */
+  @StorageLink(KEY_WEB_TEXT_ZOOM) webTextZoom: number = TEXT_ZOOM_DEFAULT;
+
+  /**
    * 悬浮条交给页面的「收起子菜单」回调（见 FloatingBar 的 onReady）。
    * 由组件在 aboutToAppear 注入，页面只保存引用。
    */
@@ -1111,6 +1131,25 @@ struct Index {
       setFloatingAutoSnap(ctx, enabled);
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'Failed to persist floating auto-snap flag');
+    }
+  }
+
+  /**
+   * 字号变更落盘（设置面板里滑块落定、或点「恢复默认」时调用）。
+   *
+   * 缩放值本身已经通过 @Link → @StorageLink 写进 AppStorage —— 拖动时网页文字是实时变的，
+   * 这里只负责夹取到合法区间并持久化，避免把 79.6% 这类值写进存储、下次启动再夹一次。
+   */
+  private setTextZoom(zoom: number): void {
+    const value: number = clampTextZoom(zoom);
+    if (this.webTextZoom !== value) {
+      this.webTextZoom = value;
+    }
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      saveTextZoom(ctx, value);
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to persist text zoom');
     }
   }
 
@@ -1704,6 +1743,9 @@ struct Index {
       // 悬浮条设置：读入 AppStorage，供设置面板与悬浮条消费
       this.fabHideOnSnap = isFloatingHideOnSnap(ctx);
       this.fabAutoSnap = isFloatingAutoSnap(ctx);
+      // 网页文字缩放：读入 AppStorage，Web 组件的 textZoomRatio 直接消费。
+      // 必须在这里（组件首次布局前）恢复，否则会先按 100% 渲染一帧再跳变。
+      this.webTextZoom = loadTextZoom(ctx);
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'Failed to restore UI prefs');
     }
@@ -1800,13 +1842,17 @@ struct Index {
    *
    * bindSheet 需要的是一个 CustomBuilder，因此这里保留一个极薄的 @Builder，
    * 只做「属性进、回调出」的转接；面板内容本身在 components/SettingsSheet.ets，
-   * 那里全部使用官方组件（Toggle / Divider）与语义化颜色资源，深浅色自动适配。
+   * 那里全部使用官方组件（Toggle / Slider / Divider）与语义化颜色资源，深浅色自动适配。
    */
   @Builder
   settingsSheet() {
     SettingsSheet({
       hideOnSnap: this.fabHideOnSnap,
       autoSnap: this.fabAutoSnap,
+      // 字号用 $ 双向绑定到 AppStorage：拖动滑块时 Web 的 textZoomRatio 实时跟随
+      fontSize: $webTextZoom,
+      onCommitFontSize: (zoom: number) => this.setTextZoom(zoom),
+      onResetFontSize: () => this.setTextZoom(TEXT_ZOOM_DEFAULT),
       onResetFabPosition: () => this.resetFabPosition(),
       onToggleHideOnSnap: (enabled: boolean) => this.setHideOnSnap(enabled),
       onToggleAutoSnap: (enabled: boolean) => this.setAutoSnap(enabled),

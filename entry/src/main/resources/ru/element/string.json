@@ -197,6 +197,10 @@
       "value": "Плавающая кнопка"
     },
     {
+      "name": "settings_section_display",
+      "value": "Отображение"
+    },
+    {
       "name": "settings_section_misc",
       "value": "Прочее"
     },
@@ -231,6 +235,22 @@
     {
       "name": "toast_save_fail",
       "value": "Не удалось сохранить, попробуйте снова"
+    },
+    {
+      "name": "settings_font_size",
+      "value": "Размер текста"
+    },
+    {
+      "name": "settings_font_size_desc",
+      "value": "Меняется только размер текста; изображения и вёрстка остаются без изменений"
+    },
+    {
+      "name": "settings_font_size_reset",
+      "value": "Сбросить"
+    },
+    {
+      "name": "a11y_font_size",
+      "value": "Изменить размер текста"
     }
   ]
 }

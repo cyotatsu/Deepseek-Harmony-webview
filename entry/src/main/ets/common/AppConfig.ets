@@ -58,3 +58,10 @@ export const KEY_FAB_HIDE_ON_SNAP: string = 'fab.hideOnSnap';
 export const KEY_FAB_AUTO_SNAP: string = 'fab.autoSnap';
 /** 请求悬浮条重置到默认位置（写 true 后由悬浮条复位并清零） */
 export const KEY_FAB_RESET_POS: string = 'fab.resetPosition';
+/**
+ * 网页文字缩放百分比（100 = 内核默认）。
+ *
+ * 由字体大小弹窗写入，Web 组件的 textZoomRatio 消费；
+ * 读写都走 AppStorage，弹窗与 Web 组件之间不必互相引用。
+ */
+export const KEY_WEB_TEXT_ZOOM: string = 'web.textZoom';

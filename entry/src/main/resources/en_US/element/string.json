@@ -197,6 +197,10 @@
       "value": "Floating button"
     },
     {
+      "name": "settings_section_display",
+      "value": "Display"
+    },
+    {
       "name": "settings_section_misc",
       "value": "Other"
     },
@@ -231,6 +235,22 @@
     {
       "name": "toast_save_fail",
       "value": "Save failed, please try again"
+    },
+    {
+      "name": "settings_font_size",
+      "value": "Font size"
+    },
+    {
+      "name": "settings_font_size_desc",
+      "value": "Changes text size only; images and layout stay unchanged"
+    },
+    {
+      "name": "settings_font_size_reset",
+      "value": "Reset"
+    },
+    {
+      "name": "a11y_font_size",
+      "value": "Adjust font size"
     }
   ]
 }

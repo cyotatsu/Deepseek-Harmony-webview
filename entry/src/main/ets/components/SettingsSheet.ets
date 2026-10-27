@@ -1,3 +1,6 @@
+import { TEXT_ZOOM_MIN, TEXT_ZOOM_MAX, TEXT_ZOOM_STEP,
+  normalizeTextZoom, formatTextZoom } from '../common/FontZoom';
+
 /**
  * 设置面板内容（官方半模态组件 bindSheet 的内容区）。
  *
@@ -16,6 +19,18 @@ export struct SettingsSheet {
   onResetFabPosition: () => void = () => {};
   onToggleHideOnSnap: (enabled: boolean) => void = () => {};
   onToggleAutoSnap: (enabled: boolean) => void = () => {};
+
+  // ── 网页显示相关 ──
+  /**
+   * 网页文字缩放百分比（100 = 内核默认）。
+   *
+   * 用 @Link 双向绑定到页面的 AppStorage 值：拖滑块时 Web 组件的
+   * textZoomRatio 立刻跟着变（平板上设置面板居中、网页可见，就是实时预览）；
+   * 但只在滑块落定（松手 / 点轨道）时通过 onCommitFontSize 落盘。
+   */
+  @Link fontSize: number;
+  onCommitFontSize: (zoom: number) => void = () => {};
+  onResetFontSize: () => void = () => {};
 
   onClearCache: () => void = () => {};
   onOpenFeedback: () => void = () => {};
@@ -93,100 +108,176 @@ export struct SettingsSheet {
 
       Divider().color($r('app.color.progress_track')).opacity(0.15)
 
-      // 说明：这里原有一个「刷新按钮」开关，用于控制悬浮条是否显示刷新按钮。
-      // 现已移除 —— 刷新改为常显（见 components/FloatingBar.ets 的子菜单顺序）。
-      // 若将来要恢复可配置，需要同时带回 @Prop refreshButtonEnabled 与 onToggleRefresh，
-      // 以及 Index.ets 里的偏好读写（UiPrefs 的 isRefreshButtonEnabled/setRefreshButtonEnabled）。
-
-      // ── 悬浮按钮 ──
-      this.sectionTitle($r('app.string.settings_section_fab'))
-
-      // 重置悬浮按钮位置：按钮可能被拖到偏下/与输入框重叠，这里给一个恢复入口
-      Row() {
-        this.actionRow($r('app.string.settings_reset_fab'), $r('app.string.settings_reset_fab_desc'))
-        SymbolGlyph($r('sys.symbol.arrow_counterclockwise'))
-          .fontSize(16)
-          .fontColor([$r('app.color.text_secondary')])
-      }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 12, bottom: 12 })
-      .alignItems(VerticalAlign.Center)
-      .onClick(() => this.onResetFabPosition())
-
-      Divider().color($r('app.color.progress_track')).opacity(0.15)
-
-      // 空闲自动吸附开关
-      Row() {
-        this.actionRow($r('app.string.settings_auto_snap'), $r('app.string.settings_auto_snap_desc'))
-        Toggle({ type: ToggleType.Switch, isOn: this.autoSnap })
-          .onChange((isOn: boolean) => this.onToggleAutoSnap(isOn))
-      }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 12, bottom: 12 })
-      .alignItems(VerticalAlign.Center)
-
-      Divider().color($r('app.color.progress_track')).opacity(0.15)
-
-      // 贴边半隐藏开关
-      Row() {
-        this.actionRow($r('app.string.settings_hide_on_snap'), $r('app.string.settings_hide_on_snap_desc'))
-        Toggle({ type: ToggleType.Switch, isOn: this.hideOnSnap })
-          .onChange((isOn: boolean) => this.onToggleHideOnSnap(isOn))
-      }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 12, bottom: 12 })
-      .alignItems(VerticalAlign.Center)
-
-      Divider().color($r('app.color.progress_track')).opacity(0.15)
-
-      // ── 其它 ──
-      this.sectionTitle($r('app.string.settings_section_misc'))
-
-      // 清理应用缓存
-      Row() {
+      // 内容区可滚动：设置项变多后（悬浮按钮 + 显示 + 其它）在平板横屏这种
+      // 高度有限的情况下放不下，底部「问题反馈」会被面板边缘直接裁掉（实机可见）。
+      // 标题栏保持固定，其余内容放进 Scroll，放不下时内部滚动。
+      Scroll() {
         Column() {
-          Text($r('app.string.settings_clear_cache'))
-            .fontSize(15)
-            .fontColor($r('app.color.text_primary'))
-          Text($r('app.string.settings_clear_cache_desc'))
-            .fontSize(12)
-            .fontColor($r('app.color.text_secondary'))
-            .margin({ top: 3 })
+
+          // 说明：这里原有一个「刷新按钮」开关，用于控制悬浮条是否显示刷新按钮。
+          // 现已移除 —— 刷新改为常显（见 components/FloatingBar.ets 的子菜单顺序）。
+          // 若将来要恢复可配置，需要同时带回 @Prop refreshButtonEnabled 与 onToggleRefresh，
+          // 以及 Index.ets 里的偏好读写（UiPrefs 的 isRefreshButtonEnabled/setRefreshButtonEnabled）。
+
+          // ── 悬浮按钮 ──
+          this.sectionTitle($r('app.string.settings_section_fab'))
+
+          // 重置悬浮按钮位置：按钮可能被拖到偏下/与输入框重叠，这里给一个恢复入口
+          Row() {
+            this.actionRow($r('app.string.settings_reset_fab'), $r('app.string.settings_reset_fab_desc'))
+            SymbolGlyph($r('sys.symbol.arrow_counterclockwise'))
+              .fontSize(16)
+              .fontColor([$r('app.color.text_secondary')])
+          }
+          .width('100%')
+          .padding({ left: 20, right: 20, top: 12, bottom: 12 })
+          .alignItems(VerticalAlign.Center)
+          .onClick(() => this.onResetFabPosition())
+
+          Divider().color($r('app.color.progress_track')).opacity(0.15)
+
+          // 空闲自动吸附开关
+          Row() {
+            this.actionRow($r('app.string.settings_auto_snap'), $r('app.string.settings_auto_snap_desc'))
+            Toggle({ type: ToggleType.Switch, isOn: this.autoSnap })
+              .onChange((isOn: boolean) => this.onToggleAutoSnap(isOn))
+          }
+          .width('100%')
+          .padding({ left: 20, right: 20, top: 12, bottom: 12 })
+          .alignItems(VerticalAlign.Center)
+
+          Divider().color($r('app.color.progress_track')).opacity(0.15)
+
+          // 贴边半隐藏开关
+          Row() {
+            this.actionRow($r('app.string.settings_hide_on_snap'), $r('app.string.settings_hide_on_snap_desc'))
+            Toggle({ type: ToggleType.Switch, isOn: this.hideOnSnap })
+              .onChange((isOn: boolean) => this.onToggleHideOnSnap(isOn))
+          }
+          .width('100%')
+          .padding({ left: 20, right: 20, top: 12, bottom: 12 })
+          .alignItems(VerticalAlign.Center)
+
+          Divider().color($r('app.color.progress_track')).opacity(0.15)
+
+          // ── 显示 ──
+          this.sectionTitle($r('app.string.settings_section_display'))
+
+          // 字号：标题 + 说明 + 右侧当前百分比（数值紧跟视线，不必另起一行）
+          Row() {
+            this.actionRow($r('app.string.settings_font_size'), $r('app.string.settings_font_size_desc'))
+            Text(formatTextZoom(this.fontSize))
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.accent'))
+          }
+          .width('100%')
+          .padding({ left: 20, right: 20, top: 12, bottom: 2 })
+          .alignItems(VerticalAlign.Center)
+
+          // 小 A —— 滑块 —— 大 A：两端字形直接说明拖动方向
+          Row() {
+            Text('A')
+              .fontSize(13)
+              .fontColor($r('app.color.text_secondary'))
+            Slider({
+              value: this.fontSize,
+              min: TEXT_ZOOM_MIN,
+              max: TEXT_ZOOM_MAX,
+              step: TEXT_ZOOM_STEP,
+              style: SliderStyle.OutSet
+            })
+              .layoutWeight(1)
+              .margin({ left: 12, right: 12 })
+              .selectedColor($r('app.color.accent'))
+              .blockColor($r('app.color.accent'))
+              .accessibilityText($r('app.string.a11y_font_size'))
+              .onChange((value: number, mode: SliderChangeMode) => {
+                // 拖动中只更新预览值（面板与网页同时变）；松开 / 点轨道时才落盘
+                this.fontSize = normalizeTextZoom(value);
+                if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
+                  this.onCommitFontSize(this.fontSize);
+                }
+              })
+            Text('A')
+              .fontSize(21)
+              .fontColor($r('app.color.text_secondary'))
+          }
+          .width('100%')
+          .padding({ left: 20, right: 20 })
+          .alignItems(VerticalAlign.Center)
+
+          // 恢复默认：右对齐的文字按钮，视觉上从属于上面的滑块
+          Row() {
+            Blank()
+            Text($r('app.string.settings_font_size_reset'))
+              .fontSize(13)
+              .fontColor($r('app.color.accent'))
+              .padding({ left: 12, right: 20, top: 6, bottom: 8 })
+              .onClick(() => this.onResetFontSize())
+          }
+          .width('100%')
+
+          Divider().color($r('app.color.progress_track')).opacity(0.15)
+
+          // ── 其它 ──
+          this.sectionTitle($r('app.string.settings_section_misc'))
+
+          // 清理应用缓存
+          Row() {
+            Column() {
+              Text($r('app.string.settings_clear_cache'))
+                .fontSize(15)
+                .fontColor($r('app.color.text_primary'))
+              Text($r('app.string.settings_clear_cache_desc'))
+                .fontSize(12)
+                .fontColor($r('app.color.text_secondary'))
+                .margin({ top: 3 })
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+          }
+          .width('100%')
+          .padding({ left: 20, right: 20, top: 16, bottom: 16 })
+          .onClick(() => this.onClearCache())
+
+          Divider().color($r('app.color.progress_track')).opacity(0.15)
+
+          // 问题反馈：按官方规范用 Want(action=viewData + browsable) 交给系统浏览器打开，
+          // 不走应用内 WebView —— 用户需要看到地址栏，也便于登录 GitHub。
+          Row() {
+            Column() {
+              Text($r('app.string.settings_feedback'))
+                .fontSize(15)
+                .fontColor($r('app.color.text_primary'))
+              Text($r('app.string.settings_feedback_desc'))
+                .fontSize(12)
+                .fontColor($r('app.color.text_secondary'))
+                .margin({ top: 3 })
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+
+            SymbolGlyph($r('sys.symbol.arrow_right_up_and_square'))
+              .fontSize(16)
+              .fontColor([$r('app.color.text_secondary')])
+          }
+          .width('100%')
+          .padding({ left: 20, right: 20, top: 16, bottom: 16 })
+          .alignItems(VerticalAlign.Center)
+          .onClick(() => this.onOpenFeedback())
         }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
+        .width('100%')
       }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 16, bottom: 16 })
-      .onClick(() => this.onClearCache())
-
-      Divider().color($r('app.color.progress_track')).opacity(0.15)
-
-      // 问题反馈：按官方规范用 Want(action=viewData + browsable) 交给系统浏览器打开，
-      // 不走应用内 WebView —— 用户需要看到地址栏，也便于登录 GitHub。
-      Row() {
-        Column() {
-          Text($r('app.string.settings_feedback'))
-            .fontSize(15)
-            .fontColor($r('app.color.text_primary'))
-          Text($r('app.string.settings_feedback_desc'))
-            .fontSize(12)
-            .fontColor($r('app.color.text_secondary'))
-            .margin({ top: 3 })
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-
-        SymbolGlyph($r('sys.symbol.arrow_right_up_and_square'))
-          .fontSize(16)
-          .fontColor([$r('app.color.text_secondary')])
-      }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 16, bottom: 16 })
-      .alignItems(VerticalAlign.Center)
-      .onClick(() => this.onOpenFeedback())
+      .layoutWeight(1)
+      .align(Alignment.Top)
+      .scrollBar(BarState.Off)
     }
     .width('100%')
+    // 必须给确定高度：bindSheet 给内容区的高度有上限（平板横屏约 82% 屏高），
+    // 根节点若自适应高度，超出的部分会被面板边缘直接裁掉、不会出现滚动；
+    // 撑满后内部的 Scroll 才有可滚动空间（layoutWeight(1) 拿到剩余高度）。
+    .height('100%')
     .backgroundColor($r('app.color.surface_card'))
   }
 }

@@ -197,6 +197,10 @@
       "value": "悬浮按钮"
     },
     {
+      "name": "settings_section_display",
+      "value": "显示"
+    },
+    {
       "name": "settings_section_misc",
       "value": "其它"
     },
@@ -231,6 +235,22 @@
     {
       "name": "toast_save_fail",
       "value": "保存失败，请重试"
+    },
+    {
+      "name": "settings_font_size",
+      "value": "字体大小"
+    },
+    {
+      "name": "settings_font_size_desc",
+      "value": "仅调整网页文字大小，图片与版面不受影响"
+    },
+    {
+      "name": "settings_font_size_reset",
+      "value": "恢复默认"
+    },
+    {
+      "name": "a11y_font_size",
+      "value": "调整字体大小"
     }
   ]
 }

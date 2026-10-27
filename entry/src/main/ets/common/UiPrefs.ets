@@ -1,6 +1,7 @@
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { clampTextZoom, TEXT_ZOOM_DEFAULT } from './FontZoom';
 
 const DOMAIN = 0x0001;
 const TAG = 'DeepSeekUiPrefs';
@@ -23,6 +24,13 @@ const KEY_BTN_SNAPPED: string = 'refresh_btn_snapped';
 const KEY_FAB_HIDE_ON_SNAP: string = 'fab_hide_on_snap';
 /** 是否启用空闲自动吸附（默认 true：停在边缘附近一段时间后自动贴边） */
 const KEY_FAB_AUTO_SNAP: string = 'fab_auto_snap';
+/**
+ * 网页文字缩放百分比。
+ *
+ * 必须持久化：这是「显示偏好」，重开应用若被重置为 100%，
+ * 用户每次都得重新调一遍。读取时按 FontZoom 的区间夹取，防止旧版本写坏的值。
+ */
+const KEY_TEXT_ZOOM: string = 'web_text_zoom';
 
 function openStore(context: common.Context): preferences.Preferences | null {
   try {
@@ -252,5 +260,41 @@ export function setFloatingAutoSnap(context: common.Context, enabled: boolean): 
     });
   } catch (err) {
     hilog.warn(DOMAIN, TAG, 'Failed to save floating auto-snap flag');
+  }
+}
+
+/**
+ * 读取网页文字缩放百分比。
+ *
+ * 读取失败或从未保存过时返回 100（内核默认）。读到越界值时按区间夹取 ——
+ * 存储里的值可能是旧版本、也可能被外部写坏，直接透传给内核会被它拒绝或挤坏布局。
+ */
+export function loadTextZoom(context: common.Context): number {
+  const store: preferences.Preferences | null = openStore(context);
+  if (!store) {
+    return TEXT_ZOOM_DEFAULT;
+  }
+  try {
+    const value: number = store.getSync(KEY_TEXT_ZOOM, TEXT_ZOOM_DEFAULT) as number;
+    return clampTextZoom(value);
+  } catch (err) {
+    hilog.warn(DOMAIN, TAG, 'Failed to load text zoom');
+    return TEXT_ZOOM_DEFAULT;
+  }
+}
+
+/** 保存网页文字缩放百分比（滑块落定 / 点恢复默认时调用） */
+export function saveTextZoom(context: common.Context, zoom: number): void {
+  const store: preferences.Preferences | null = openStore(context);
+  if (!store) {
+    return;
+  }
+  try {
+    store.putSync(KEY_TEXT_ZOOM, clampTextZoom(zoom));
+    store.flush().catch(() => {
+      hilog.warn(DOMAIN, TAG, 'Failed to flush text zoom');
+    });
+  } catch (err) {
+    hilog.warn(DOMAIN, TAG, 'Failed to save text zoom');
   }
 }

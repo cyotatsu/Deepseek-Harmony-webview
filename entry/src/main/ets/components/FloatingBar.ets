@@ -305,6 +305,7 @@ export struct FloatingBar {
 
   /** 子菜单整体高度（含与主按钮的间距） */
   private subStackHeight(): number {
+    // 常显一个（设置）；刷新按开关决定是否占据第二格
     const count: number = this.refreshEnabled ? 2 : 1;
     return this.SUB_SIZE * count + this.SUB_GAP * count;
   }
@@ -952,11 +953,13 @@ export struct FloatingBar {
       y: this.isExpanded ? 1 : 0.5,
       centerY: '100%'
     })
-    // ⚠️ 命中测试必须跟随展开状态。
-    // 收起时子按钮只是 opacity(0)（仍在视图树里、仍占布局位置），
-    // 若这里恒为 Block，隐藏的设置/刷新按钮**依然可点** ——
+    // ⚠️ 收起时必须**既不响应、也不拦截**触摸。
+    // 收起时子按钮只是 opacity(0)（仍在视图树里、仍占布局位置），若一直可点，
     // 实机表现就是"点悬浮球下方那块区域会莫名打开设置界面"。
-    .hitTestBehavior(this.isExpanded ? HitTestMode.Block : HitTestMode.None)
+    //
+    // 用 .enabled() 跟随展开状态：禁用后节点不响应点击，展开时才参与交互。
+    .hitTestBehavior(HitTestMode.Block)
+    .enabled(this.isExpanded)
     .accessibilityText(a11y)
     .onClick(() => {
       this.wakeUp();
@@ -1090,7 +1093,7 @@ export struct FloatingBar {
               })
           )
         )
-        // 子按钮排在主按钮**下方**（自下而上顺序改为：设置 → 刷新 → … 见下方注释）
+        // 子按钮排在主按钮**下方**（自上而下顺序：设置 → 刷新）
         this.subButton($r('sys.symbol.gearshape'), $r('app.string.settings_title'), () => {
           this.onOpenSettings();
         })

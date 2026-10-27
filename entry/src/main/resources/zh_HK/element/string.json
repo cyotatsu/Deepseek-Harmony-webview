@@ -197,6 +197,10 @@
       "value": "懸浮按鈕"
     },
     {
+      "name": "settings_section_display",
+      "value": "顯示"
+    },
+    {
       "name": "settings_section_misc",
       "value": "其它"
     },
@@ -231,6 +235,22 @@
     {
       "name": "toast_save_fail",
       "value": "儲存失敗，請重試"
+    },
+    {
+      "name": "settings_font_size",
+      "value": "字級大小"
+    },
+    {
+      "name": "settings_font_size_desc",
+      "value": "僅調整網頁文字大小，圖片與版面不受影響"
+    },
+    {
+      "name": "settings_font_size_reset",
+      "value": "還原預設"
+    },
+    {
+      "name": "a11y_font_size",
+      "value": "調整字級大小"
     }
   ]
 }
