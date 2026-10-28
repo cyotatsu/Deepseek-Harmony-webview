@@ -195,6 +195,14 @@ export struct FloatingBar {
   /** 拖动过程中最近一次纵向位移（vp） */
   private lastOffY: number = 0;
   /**
+   * 本次按下是否已经长按进入过拖动态。
+   *
+   * 为什么需要：长按作为拖动的前提，松手时**单击回调照样会触发**（实测长按后松手
+   * 会执行一次 onFabTap，把吸附态按钮解除吸附）。那不是用户点它的本意，
+   * 所以长按一旦发生就把这次点击吞掉，让「长按但没拖」= 什么都没发生。
+   */
+  private longPressFired: boolean = false;
+  /**
    * 「空闲自动吸附」的邻近判定距离（vp）。
    *
    * 比拖动吸附阈值（边距 + 半径 ≈ 48vp）宽一些：空闲兜底是**帮用户归位**，
@@ -699,6 +707,12 @@ export struct FloatingBar {
    *（见 {@link onFabDragStart}）。
    */
   private onFabTap(): void {
+    // 长按（拖动态）之后松手，单击回调仍会来一次；那不是点击本意，直接吞掉，
+    // 让「长按但没拖动」表现为什么都没发生（见 longPressFired 的注释）。
+    if (this.longPressFired) {
+      this.longPressFired = false;
+      return;
+    }
     this.wakeUp();
     if (this.isExpanded) {
       this.collapse();
@@ -749,16 +763,18 @@ export struct FloatingBar {
   }
 
   /**
-   * 进入拖动态（由 PanGesture 在位移达到阈值时调用）。
+   * 进入拖动态（由 GestureGroup 里 LongPressGesture 的 onAction 调用）。
    *
-   * 名称保留 historic 语义：这里是「拖动开始」而不是「长按」——
-   * 现在没有长按步骤了（长按会触发系统放大显示，见 build 里的说明）。
+   * 长按 320ms 是拖动的**功能性前提**：按钮上绑了单击行为，单击识别器会把触摸吃掉，
+   * 同一节点上的 PanGesture 永远不激活（换 TapGesture / Parallel 手势组 / 降低阈值
+   * 都试过，均无效），详见 build 里手势组的注释。
    *
    * **与吸附状态无关**：无论按钮贴在边缘（半隐藏）还是已归位，拖动都能直接开始。
    * 吸附态下先把位置基准固定在当前（半隐藏）坐标，拖动过程中再按边界夹取。
    */
   private onFabDragStart(): void {
     this.wakeUp();
+    this.longPressFired = true;
     this.isDragging = true;
     this.dragBaseCx = this.btnCx;
     this.dragBaseCy = this.btnCy;
@@ -786,6 +802,35 @@ export struct FloatingBar {
       this.onDragStateChange(false);
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'onDragStateChange(false) failed');
+    }
+  }
+
+  /**
+   * 兜底结束「长按了但没拖动」的拖动态。
+   *
+   * 拖动靠 GestureGroup(GestureMode.Sequence, LongPress → Pan) 实现：长按到点就
+   * 进入拖动态（isDragging = true，视觉上是底色提亮 + 加粗描边 + 放大 1.12）。
+   * 但**若此时直接松手、完全不移动**，Sequence 里的 PanGesture 不会激活，它的
+   * onActionEnd / onActionCancel 都不会被调用 —— 于是没人调 endDrag()，
+   * 按钮就永久卡在高亮状态、点什么都没后续反应（实机症状）。
+   *
+   * 触摸的 Up / Cancel 是这种情况下**唯一一定到来**的事件，所以在这里收尾：
+   * 有位移的按正常松手处理（吸附 + 落盘），完全没动的只恢复状态，
+   * 免得按钮自己"跳"一下。
+   */
+  private settleInterruptedDrag(): void {
+    if (!this.isDragging) {
+      return;
+    }
+    const moved: boolean = Math.abs(this.lastOffX) > 0.5 || Math.abs(this.lastOffY) > 0.5;
+    this.endDrag();
+    if (moved) {
+      if (!this.trySwipeSnap()) {
+        this.snapToNearestEdge();
+      }
+      this.saveOffset();
+    } else {
+      this.scheduleIdleFade();
     }
   }
 
@@ -1048,9 +1093,13 @@ export struct FloatingBar {
         .onTouch((event: TouchEvent) => {
           if (event.type === TouchType.Down) {
             this.isPressed = true;
+            this.longPressFired = false;
             this.wakeUp();
           } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
             this.isPressed = false;
+            // 长按后直接松手（没有位移）时手势组不会给任何回调，必须在这里收尾，
+            // 否则按钮卡在"拖动中"的高亮状态（见 settleInterruptedDrag 的注释）。
+            this.settleInterruptedDrag();
           }
         })
         // 手势：**轻点 → 展开/收起；长按后拖动 → 移动按钮**。

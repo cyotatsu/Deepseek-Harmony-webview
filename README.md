@@ -22,6 +22,10 @@
 > 在原项目基础上继续完善。原作者 **Sakura Neko**（MIT 许可，详见 [LICENSE](./LICENSE)）。
 > 本项目与 DeepSeek 官方无任何关联；DeepSeek 名称及相关标识归其权利人所有。
 
+## HAP Store 获取地址
+
+<https://www.sydxky.cn/detail.php?id=1072>
+
 ## 功能
 
 | 功能 | 说明 |
@@ -76,11 +80,11 @@ entry/src/main/ets/
 |------|------|
 | DevEco Studio | 6.0+ |
 | HarmonyOS SDK | API 23+ |
-| 权限 | `ohos.permission.INTERNET`、`ohos.permission.GET_NETWORK_INFO` |
+| 权限 | `ohos.permission.INTERNET`、`ohos.permission.GET_NETWORK_INFO`、`ohos.permission.MICROPHONE`（语音输入，运行时申请） |
 
 ## 版本
 
-`dev.cyotatsu.deepseek.oh` — v1.1.6 (1001060)
+`dev.cyotatsu.deepseek.oh` — v1.1.6.1 (1001061)
 
 `versionCode` 编码规则：`主版本×1000000 + 次版本×10000 + 修订×10 + 构建`。
 发版只需改 `AppScope/app.json5` 的 `versionName` 与 `versionCode`
