@@ -251,6 +251,42 @@
     {
       "name": "a11y_font_size",
       "value": "调整字体大小"
+    },
+    {
+      "name": "settings_font_size_subtitle",
+      "value": "调整聊天消息字体大小"
+    },
+    {
+      "name": "settings_font_preview",
+      "value": "预览"
+    },
+    {
+      "name": "settings_font_preview_text",
+      "value": "这是一段示例文字，调整滑杆时字体会实时变化，松手后应用到全部对话。"
+    },
+    {
+      "name": "settings_font_level_small",
+      "value": "小"
+    },
+    {
+      "name": "settings_font_level_normal",
+      "value": "标准"
+    },
+    {
+      "name": "settings_font_level_large",
+      "value": "大"
+    },
+    {
+      "name": "settings_font_level_xlarge",
+      "value": "特大"
+    },
+    {
+      "name": "common_back",
+      "value": "返回"
+    },
+    {
+      "name": "toast_font_size_reset",
+      "value": "已恢复默认字号"
     }
   ]
 }

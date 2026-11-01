@@ -251,6 +251,42 @@
     {
       "name": "a11y_font_size",
       "value": "Изменить размер текста"
+    },
+    {
+      "name": "settings_font_size_subtitle",
+      "value": "Размер текста сообщений"
+    },
+    {
+      "name": "settings_font_preview",
+      "value": "Предпросмотр"
+    },
+    {
+      "name": "settings_font_preview_text",
+      "value": "Это пример текста. Пока вы двигаете ползунок, размер меняется сразу, а после отпускания применяется ко всем диалогам."
+    },
+    {
+      "name": "settings_font_level_small",
+      "value": "Мелкий"
+    },
+    {
+      "name": "settings_font_level_normal",
+      "value": "Обычный"
+    },
+    {
+      "name": "settings_font_level_large",
+      "value": "Крупный"
+    },
+    {
+      "name": "settings_font_level_xlarge",
+      "value": "Очень крупный"
+    },
+    {
+      "name": "common_back",
+      "value": "Назад"
+    },
+    {
+      "name": "toast_font_size_reset",
+      "value": "Размер шрифта по умолчанию восстановлен"
     }
   ]
 }

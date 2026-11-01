@@ -42,7 +42,7 @@
     },
     {
       "name": "floating_button_bg",
-      "value": "#FF2C2C2E"
+      "value": "#E62C2C2E"
     },
     {
       "name": "floating_button_shadow",
@@ -66,7 +66,7 @@
     },
     {
       "name": "floating_button_bg_active",
-      "value": "#FF3A3A3C"
+      "value": "#F23A3A3C"
     },
     {
       "name": "floating_button_border",
@@ -87,6 +87,14 @@
     {
       "name": "preview_backdrop",
       "value": "#E6000000"
+    },
+    {
+      "name": "slider_track",
+      "value": "#3A3A3C"
+    },
+    {
+      "name": "slider_thumb",
+      "value": "#FFFFFF"
     }
   ]
 }

@@ -25,6 +25,7 @@ import { buildUserAgent, buildViewportFixScript, buildResizeNotifyScript,
   buildProbeScript, buildOverlayProbeScript, buildOverlayDismissScript, buildOverlayCloseScript,
   parseOverlayKind, OVERLAY_PREVIEW, OVERLAY_CONFIRM,
   isDismissClicked, buildComposerAutoHideScript, buildKeyboardStateScript, buildRetryFocusScript,
+  buildBaseFontProbeScript,
   VIEWPORT_RESIZE_DEBOUNCE_MS } from '../common/WebViewport';
 import { buildFocusGuardScript, ENABLE_IMAGE_TAP_FOCUS_GUARD } from '../common/WebInputGuard';
 import { decideBackAction, BackContext, EXIT_CONFIRM_WINDOW_MS,
@@ -118,6 +119,14 @@ struct Index {
   // 状态栏避让高度（vp）。底部沉浸开启后布局延伸到系统栏区域，顶部需要按此补 padding，
   // 视觉上仍是一条正常的状态栏，而不是内容压到状态栏文字下面。
   @State statusBarHeightVp: number = 0;
+  /**
+   * 底部导航条（手势条）高度（vp）。
+   *
+   * 页面底部是沉浸式的（padding bottom 0），底部弹窗会一直铺到屏幕最下沿、被手势条压住；
+   * 字号页最下面那行「恢复默认」正好落在这一带，手指不好点。因此记录这条避让区并交给
+   * 设置面板，让它底部留出空白。
+   */
+  @State bottomSafeInsetVp: number = 0;
   private avoidAreaHandler: ((data: window.AvoidAreaOptions) => void) | null = null;
   // 页面可用尺寸（vp），由根容器 onAreaChange 提供，传给悬浮操作条用于边界限制与键盘避让。
   // 操作条自身的位置状态、拖拽手势与位置持久化都在 components/FloatingBar.ets 内。
@@ -125,6 +134,12 @@ struct Index {
   @State pageH: number = 0;
   // 设置面板开关
   @State showSettings: boolean = false;
+  // 正在拖动字号滑块：用于冻结预览卡高度，保证滑轨不在手指底下移动
+  @State fontDragging: boolean = false;
+  // 设置面板是否停在「字体大小」子页（列表 → 字号页）
+  @State fontPage: boolean = false;
+  // 网页正文的实际字号（CSS px），供设置里的字号预览对齐；测不到时用 16
+  @State webBaseFontPx: number = 16;
   // 用户已勾选「不再显示」刷新确认弹窗（持久化）
   @State refreshSkipConfirm: boolean = false;
   // 本次弹窗里「不再显示」的勾选状态（每次弹出前重置，@Link 绑定给弹窗组件）
@@ -385,6 +400,8 @@ struct Index {
 
             // 打印一次运行时视口诊断，便于实机确认 viewport 是否真的生效
             this.probeViewport();
+            // 页面加载完量一次正文字号，让设置里的「字体大小」预览与对话一致
+            this.probeWebBaseFont();
             this.updateBackButtonState();
           })
           .onErrorReceive((event) => {
@@ -599,6 +616,25 @@ struct Index {
           })
         }
 
+        // 半模态面板打开时，铺一层全屏点击捕获层（位于面板之下、悬浮球之下）。
+        // 为什么需要它：手机端的 bindSheet 半模态在真机上点击遮罩区域不会自动收起
+        // （平板端正常），于是自己接手这件事 —— 点在面板以外就关掉面板。
+        // 面板自身在更上层的系统浮层里，点在面板上不会落到这一层，因此不会误关。
+        if (this.showSettings) {
+          Column()
+            .width('100%')
+            .height('100%')
+            // Block：面板是模态的，这一层存在时不应该把点击漏给下面网页
+            .hitTestBehavior(HitTestMode.Block)
+            // 系统遮罩已被关掉（见 bindSheet 的 maskColor），这里自己压暗：
+            // 与原来系统遮罩同一档浓度，视觉上无变化
+            .backgroundColor('#33000000')
+            .zIndex(99)
+            .onClick(() => {
+              this.showSettings = false;
+            })
+        }
+
         // 右下角悬浮操作条（刷新 + 设置）。位置状态、拖拽手势、边界限制与位置持久化
         // 全部收在 components/FloatingBar.ets 内；页面只决定「刷新要不要弹确认框」，
         // 并把页面可用尺寸与键盘高度传下去供其计算边界与避让。
@@ -661,16 +697,32 @@ struct Index {
     // 这是官方对「大屏居中、小屏全屏」的标准处理方式。
     .bindSheet($$this.showSettings, this.settingsSheet(), {
       preferType: deviceInfo.deviceType === 'phone'
-        ? SheetType.CONTENT_COVER : SheetType.CENTER,
+        // 手机端字号页只在底部占一条（BOTTOM + FIT_CONTENT），上方对话界面照常可见；
+        // 设置列表仍用 CONTENT_COVER 全屏覆盖。
+        ? (this.fontPage ? SheetType.BOTTOM : SheetType.CONTENT_COVER)
+        : SheetType.CENTER,
+      // 列表页用默认的 LARGE；字号页按内容高度收成一张卡片（FIT_CONTENT），
+      // 否则默认高度会在底部留一大片空白。
+      height: this.fontPage ? SheetSize.FIT_CONTENT : SheetSize.LARGE,
       backgroundColor: $r('app.color.surface_card'),
+      // 遮罩改由页面自己的捕获层绘制（见 build() 里 showSettings 分支）：
+      // 开了 enableOutsideInteractive 之后系统遮罩不再绘制，平板端就会「没有遮罩」；
+      // 自己画一份，两端表现才一致。
+      maskColor: Color.Transparent,
       // 标题栏与关闭按钮一律自绘（见 settingsSheet 内的标题栏）。因此这里：
       //   · 不设 title      —— 避免与自绘标题重复；
       //   · showClose=false —— CENTER（平板）形态系统默认会渲染一颗关闭按钮，
       //                        不关掉就会与自绘的那颗叠在同一位置。
       // 手机端 CONTENT_COVER 形态系统本来就不渲染标题栏，自绘是唯一可行方案。
+      // 允许点击面板以外的区域：面板自身是否「点遮罩即关」在各端表现不一致
+      //（手机上实测点遮罩无反应），因此允许外部交互，由页面那层点击捕获层负责
+      // 收起面板（见 build() 里 showSettings 分支）。
+      enableOutsideInteractive: true,
       showClose: false,
       onDisappear: () => {
         this.showSettings = false;
+        this.fontDragging = false;
+        this.fontPage = false;
       }
     })
   }
@@ -1215,6 +1267,30 @@ struct Index {
    * 并给输入框加高度上限，避免长文本时输入框无限向上扩张。
    * 脚本内容见 common/WebViewport.buildViewportFixScript。
    */
+  /**
+   * 量一次网页正文的实际字号，存进 `webBaseFontPx`。设置面板的字号预览用它做基准，
+   * 这样预览里的样例文字与对话正文是同一字号量级（而不是按 16vp 硬编码猜）。
+   *
+   * 取不到（页面还没渲染出正文、脚本被拦）时保持上一个值，首次仍是 16。
+   */
+  private probeWebBaseFont(): void {
+    try {
+      this.controller.runJavaScript(buildBaseFontProbeScript())
+        .then((result: string) => {
+          const px: number = Number(result);
+          // 只接受合理区间：站点正文字号通常在 12~24px，越界视为异常值
+          if (!isNaN(px) && px >= 10 && px <= 32) {
+            this.webBaseFontPx = Math.round(px * 10) / 10;
+          }
+        })
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'base font probe failed: %{public}d', err.code);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to probe base font');
+    }
+  }
+
   private applyViewportFix(): void {
     try {
       // 把「应用窗口宽度」传进脚本：布局视口必须等于窗口宽度。
@@ -1696,6 +1772,12 @@ struct Index {
         }
         return;
       }
+      if (data.type === window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR) {
+        const navPx: number = data.area.visible ? data.area.bottomRect.height : 0;
+        const navVp: number = navPx > 0 ? this.getUIContext().px2vp(navPx) : 0;
+        this.bottomSafeInsetVp = navVp;
+        return;
+      }
       if (data.type !== window.AvoidAreaType.TYPE_KEYBOARD) {
         return;
       }
@@ -1717,6 +1799,9 @@ struct Index {
         try {
           const sysArea: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
           this.statusBarHeightVp = this.getUIContext().px2vp(sysArea.topRect.height);
+          const navArea: window.AvoidArea =
+            win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+          this.bottomSafeInsetVp = this.getUIContext().px2vp(navArea.bottomRect.height);
         } catch (err) {
           hilog.warn(DOMAIN, TAG, 'getWindowAvoidArea failed');
         }
@@ -1851,6 +1936,10 @@ struct Index {
       autoSnap: this.fabAutoSnap,
       // 字号用 $ 双向绑定到 AppStorage：拖动滑块时 Web 的 textZoomRatio 实时跟随
       fontSize: $webTextZoom,
+      fontDragging: $fontDragging,
+      bottomInset: this.bottomSafeInsetVp,
+      fontPage: $fontPage,
+      baseFontPx: this.webBaseFontPx,
       onCommitFontSize: (zoom: number) => this.setTextZoom(zoom),
       onResetFontSize: () => this.setTextZoom(TEXT_ZOOM_DEFAULT),
       onResetFabPosition: () => this.resetFabPosition(),

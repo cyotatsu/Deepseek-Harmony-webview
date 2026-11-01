@@ -137,14 +137,12 @@ export struct FloatingBar {
    */
   private readonly UNSNAP_INSET: number = 4;
   /**
-   * 进入拖动所需的**长按时长**（ms）。
+   * 拖动阈值（vp）：手指位移超过它才进入拖动态。
    *
-   * 400ms 是上一版验证过的值；本轮收到 320ms，目的是缩短"按住不动"的窗口，
-   * 降低系统把这串触摸判定为长按手势、进而弹出「放大显示」的概率
-   *（系统放大要等长按成立后再持续一小段，320ms 通常已进入拖动、触摸被消费）。
-   * 不要再往下压：太短会和轻点/滑动混淆，导致点击被误判成拖动。
+   * 只需要区分「轻点时的抖动」和「真的在拖」，因此取小值 —— 手指一动按钮就跟着走，
+   * 不再像旧版那样必须先按住 320ms 才肯移动（实机手感反馈：那样不跟手）。
    */
-  private readonly LONG_PRESS_MS: number = 320;
+  private readonly DRAG_SLOP: number = 5;
   /**
    * 闲置时的不透明度。
    *
@@ -163,6 +161,12 @@ export struct FloatingBar {
   // 手势基准
   private dragBaseCx: number = 0;
   private dragBaseCy: number = 0;
+  /** 进入拖动态那一刻的手指屏幕坐标（vp）：位移从这里算起 */
+  private dragFingerX: number = 0;
+  private dragFingerY: number = 0;
+  /** 按下时的手指屏幕坐标（vp）：用于判断是否越过拖动阈值 */
+  private downScreenX: number = 0;
+  private downScreenY: number = 0;
   private idleTimer: number = -1;
   // ── 位置持久化 ──
   /** 上次保存的位移（相对右下角默认位置）；拿到页面尺寸后换算成屏幕坐标 */
@@ -194,14 +198,6 @@ export struct FloatingBar {
   private lastOffX: number = 0;
   /** 拖动过程中最近一次纵向位移（vp） */
   private lastOffY: number = 0;
-  /**
-   * 本次按下是否已经长按进入过拖动态。
-   *
-   * 为什么需要：长按作为拖动的前提，松手时**单击回调照样会触发**（实测长按后松手
-   * 会执行一次 onFabTap，把吸附态按钮解除吸附）。那不是用户点它的本意，
-   * 所以长按一旦发生就把这次点击吞掉，让「长按但没拖」= 什么都没发生。
-   */
-  private longPressFired: boolean = false;
   /**
    * 「空闲自动吸附」的邻近判定距离（vp）。
    *
@@ -439,6 +435,24 @@ export struct FloatingBar {
   private keyboardLiftVp(): number {
     return keyboardLift(this.btnCx, this.btnCy, this.boundsH(), this.keyboardHeightVp,
       this.FAB_SIZE, this.DRAG_MARGIN, this.isDragging);
+  }
+
+  /** 命中框（页面坐标）：只包住主按钮 + 展开后的子按钮，用于拦住下层网页 */
+  private hitBoxW(): number {
+    return this.FAB_TOUCH_SIZE;
+  }
+
+  private hitBoxH(): number {
+    return this.FAB_TOUCH_SIZE + (this.isExpanded ? this.subStackHeight() : 0);
+  }
+
+  private hitBoxX(): number {
+    return this.btnCx - this.winX - this.hitBoxW() / 2;
+  }
+
+  private hitBoxY(): number {
+    return this.btnCy - this.winY - this.FAB_SIZE / 2 - this.keyboardLiftVp()
+      - (this.FAB_TOUCH_SIZE - this.FAB_HIT_SIZE) / 2;
   }
 
   /** 未保存过位置时的默认中心 y（与 placeByDefault 保持一致，作为位移基准） */
@@ -707,12 +721,9 @@ export struct FloatingBar {
    *（见 {@link onFabDragStart}）。
    */
   private onFabTap(): void {
-    // 长按（拖动态）之后松手，单击回调仍会来一次；那不是点击本意，直接吞掉，
-    // 让「长按但没拖动」表现为什么都没发生（见 longPressFired 的注释）。
-    if (this.longPressFired) {
-      this.longPressFired = false;
-      return;
-    }
+    // 注：长按（拖动态）后松手，单击回调仍会来一次，这里**不吞掉它** ——
+    // 让长按后松手与普通点击表现一致（解除吸附 / 展开），比"点了没反应"更可预期。
+    // 真正的拖动由 onFabTouch 的 Move 分支接走，不会走到这里。
     this.wakeUp();
     if (this.isExpanded) {
       this.collapse();
@@ -763,21 +774,24 @@ export struct FloatingBar {
   }
 
   /**
-   * 进入拖动态（由 GestureGroup 里 LongPressGesture 的 onAction 调用）。
+   * 进入拖动态（由 {@link onFabTouch} 在手指位移超过 DRAG_SLOP 时调用）。
    *
-   * 长按 320ms 是拖动的**功能性前提**：按钮上绑了单击行为，单击识别器会把触摸吃掉，
-   * 同一节点上的 PanGesture 永远不激活（换 TapGesture / Parallel 手势组 / 降低阈值
-   * 都试过，均无效），详见 build 里手势组的注释。
+   * 不再使用 LongPressGesture + PanGesture 的手势序列：那条路必须先按住 320ms
+   * 才能开始移动，手指已经走了十几毫米按钮还没动，正是「不跟手」的来源。
+   * 现在拖动由 onTouch 的 Move 事件直接驱动，没有手势仲裁、没有等待。
    *
    * **与吸附状态无关**：无论按钮贴在边缘（半隐藏）还是已归位，拖动都能直接开始。
    * 吸附态下先把位置基准固定在当前（半隐藏）坐标，拖动过程中再按边界夹取。
    */
-  private onFabDragStart(): void {
+  private onFabDragStart(fingerX: number, fingerY: number): void {
     this.wakeUp();
-    this.longPressFired = true;
     this.isDragging = true;
     this.dragBaseCx = this.btnCx;
     this.dragBaseCy = this.btnCy;
+    // 位移从**按下点**算起（而不是从越过阈值那一刻），这样第一帧就不会少走
+    // 一个 DRAG_SLOP 的距离 —— 按下即跟手
+    this.dragFingerX = fingerX;
+    this.dragFingerY = fingerY;
     // 清零位移记录：顺向甩动的判断只看本次拖动
     this.lastOffX = 0;
     this.lastOffY = 0;
@@ -806,31 +820,73 @@ export struct FloatingBar {
   }
 
   /**
-   * 兜底结束「长按了但没拖动」的拖动态。
+   * 主按钮的触摸处理：**自己算拖动**，不再挂 GestureGroup。
    *
-   * 拖动靠 GestureGroup(GestureMode.Sequence, LongPress → Pan) 实现：长按到点就
-   * 进入拖动态（isDragging = true，视觉上是底色提亮 + 加粗描边 + 放大 1.12）。
-   * 但**若此时直接松手、完全不移动**，Sequence 里的 PanGesture 不会激活，它的
-   * onActionEnd / onActionCancel 都不会被调用 —— 于是没人调 endDrag()，
-   * 按钮就永久卡在高亮状态、点什么都没后续反应（实机症状）。
+   * 旧做法是 GestureGroup(Sequence, LongPress(320ms) → PanGesture)：按钮上还有单击
+   * 行为，单击识别器会先吃掉触摸，PanGesture 只有在长按成功后才被放行。代价是
+   * 「按住 320ms 才能开始移动」，手指走了十几毫米而按钮纹丝不动 —— 手感不跟手。
    *
-   * 触摸的 Up / Cancel 是这种情况下**唯一一定到来**的事件，所以在这里收尾：
-   * 有位移的按正常松手处理（吸附 + 落盘），完全没动的只恢复状态，
-   * 免得按钮自己"跳"一下。
+   * 现在三件事都放在 onTouch 里自己判断，靠时间（按压时长）与距离（DRAG_SLOP）区分：
+   *   · Down：记下按下点与时间，按钮进入按下态；
+   *   · Move：位移越过阈值即开始拖动，之后每帧都用「手指屏幕坐标 + 起手偏移」算球心，
+   *           1:1 跟手、无缓动；
+   *   · Up：拖动过就收尾（甩动吸附 / 最近边吸附 / 落盘）；没拖动就当作轻点。
+   *
+   * 因为球心始终由手指坐标直接算出，也不会再出现「长按后不移动卡在高亮态」的问题：
+   * 没进入拖动态就没有需要收尾的状态。
    */
-  private settleInterruptedDrag(): void {
-    if (!this.isDragging) {
+  private onFabTouch(event: TouchEvent): void {
+    const touch: TouchObject | undefined = event.touches.length > 0 ? event.touches[0] : undefined;
+    if (event.type === TouchType.Down) {
+      this.wakeUp();
+      this.isPressed = true;
+      this.lastOffX = 0;
+      this.lastOffY = 0;
+      if (touch !== undefined) {
+        this.downScreenX = touch.screenX;
+        this.downScreenY = touch.screenY;
+      }
       return;
     }
-    const moved: boolean = Math.abs(this.lastOffX) > 0.5 || Math.abs(this.lastOffY) > 0.5;
-    this.endDrag();
-    if (moved) {
+    if (event.type === TouchType.Move) {
+      if (touch === undefined) {
+        return;
+      }
+      if (!this.isDragging) {
+        const dx: number = touch.screenX - this.downScreenX;
+        const dy: number = touch.screenY - this.downScreenY;
+        // 还没越过阈值：按抖动忽略，轻点时按钮不会乱晃
+        if (dx * dx + dy * dy < this.DRAG_SLOP * this.DRAG_SLOP) {
+          return;
+        }
+        this.onFabDragStart(this.downScreenX, this.downScreenY);
+      }
+      const offX: number = touch.screenX - this.dragFingerX;
+      const offY: number = touch.screenY - this.dragFingerY;
+      // 记录本次拖动的位移，松手时据此判断「顺向甩动」
+      this.lastOffX = offX;
+      this.lastOffY = offY;
+      // 夹取交给纯函数（可单测），保证拖到边界即停、不越界
+      this.btnCx = clampDragX(this.geom(this.dragBaseCx + offX, this.btnCy));
+      this.btnCy = clampDragY(this.geom(this.btnCx, this.dragBaseCy + offY));
+      return;
+    }
+    // ── Up / Cancel ──
+    this.isPressed = false;
+    if (this.isDragging) {
+      this.endDrag();
+      // 顺向甩动优先：按钮已在右半边右甩 → 吸右边；左半边左甩 → 吸左边。
+      // 命中就不再走常规吸附，避免被「最近边」改判。
       if (!this.trySwipeSnap()) {
         this.snapToNearestEdge();
       }
       this.saveOffset();
-    } else {
-      this.scheduleIdleFade();
+      return;
+    }
+    // 没拖动过就当作轻点 —— **不设按压时长上限**：长按后松手也给同样的反馈，
+    // 否则用户按住超过阈值再松手会得到「什么也没发生」的死区手感。
+    if (event.type === TouchType.Up) {
+      this.onFabTap();
     }
   }
 
@@ -1089,59 +1145,11 @@ export struct FloatingBar {
         })
         .hitTestBehavior(HitTestMode.Block)
         .accessibilityText($r('app.string.a11y_more_actions'))
-        .onClick(() => this.onFabTap())
+        // 轻点与拖动都在 onFabTouch 里判断（见其注释），不再挂 onClick：
+        // 两者并存会让同一次抬起既走轻点又走拖动收尾。
         .onTouch((event: TouchEvent) => {
-          if (event.type === TouchType.Down) {
-            this.isPressed = true;
-            this.longPressFired = false;
-            this.wakeUp();
-          } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
-            this.isPressed = false;
-            // 长按后直接松手（没有位移）时手势组不会给任何回调，必须在这里收尾，
-            // 否则按钮卡在"拖动中"的高亮状态（见 settleInterruptedDrag 的注释）。
-            this.settleInterruptedDrag();
-          }
+          this.onFabTouch(event);
         })
-        // 手势：**轻点 → 展开/收起；长按后拖动 → 移动按钮**。
-        //
-        // ⚠️ 「长按」这一步不能删：按钮上有单击行为时，单击识别器会把触摸"吃掉"，
-        // 同一节点上的 PanGesture 永远不会激活（换成 TapGesture、Parallel 手势组、
-        // 降低阈值、延长按压都试过，均无效）。长按是拖动能生效的功能性前提。
-        //
-        // 位置换算（跟手的关键）：整列被 translate 拖动 off 后，主按钮又相对整列偏移 off，
-        // 故按钮绝对位置 = 基准 + off + off；把基准也加 off 即严格 1:1 跟手。
-        .gesture(
-          GestureGroup(GestureMode.Sequence,
-            LongPressGesture({ repeat: false, duration: this.LONG_PRESS_MS })
-              .onAction(() => {
-                this.onFabDragStart();
-              }),
-            PanGesture({ fingers: 1, direction: PanDirection.All, distance: 1 })
-              .onActionUpdate((event: GestureEvent) => {
-                const offX: number = event.offsetX;
-                const offY: number = event.offsetY;
-                // 记录本次拖动的位移，松手时据此判断「顺向甩动」
-                this.lastOffX = offX;
-                this.lastOffY = offY;
-                // 夹取交给纯函数（可单测），保证拖到边界即停、不越界
-                this.btnCx = clampDragX(this.geom(this.dragBaseCx + offX, this.btnCy));
-                this.btnCy = clampDragY(this.geom(this.btnCx, this.dragBaseCy + offY));
-              })
-              .onActionEnd(() => {
-                this.endDrag();
-                // 顺向甩动优先：按钮已在右半边右甩 → 吸右边；左半边左甩 → 吸左边。
-                // 命中就不再走常规吸附，避免被"最近边"改判。
-                if (!this.trySwipeSnap()) {
-                  this.snapToNearestEdge();
-                }
-                this.saveOffset();
-              })
-              .onActionCancel(() => {
-                this.endDrag();
-                this.snapToNearestEdge();
-              })
-          )
-        )
         // 子按钮排在主按钮**下方**（自上而下顺序：设置 → 刷新）
         this.subButton($r('sys.symbol.gearshape'), $r('app.string.settings_title'), () => {
           this.onOpenSettings();
@@ -1191,6 +1199,17 @@ export struct FloatingBar {
     //   · Transparent = 自身响应且**下层节点也能响应**：按钮可点可拖，代价是触摸会同时
     //     分发给下层 Web 组件（这是网页文本选择放大镜的来源）。
     // 折中：保留 Transparent，靠按钮自身那层 Block 拦住落在响应区内的触摸。
-    .hitTestBehavior(HitTestMode.Transparent)
+    // 只把「主按钮 + 子按钮」那一小块当作自己的响应区域：
+    //   · 框内：自身命中 → 按 Default 语义**挡住兄弟节点**（下层 Web 收不到这次触摸）
+    //   · 框外：自身没命中 → 不挡任何人，网页照常收到
+    // 之前的 Transparent 会把自己和下层网页**同时**喂到这次触摸，所以点悬浮球时
+    // 网页也会响应（输入框被聚焦、长按出文字选择放大镜）。
+    .responseRegion({
+      x: this.hitBoxX(),
+      y: this.hitBoxY(),
+      width: this.hitBoxW(),
+      height: this.hitBoxH()
+    })
+    .hitTestBehavior(HitTestMode.Default)
   }
 }

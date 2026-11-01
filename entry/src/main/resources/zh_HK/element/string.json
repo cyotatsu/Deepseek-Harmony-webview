@@ -251,6 +251,42 @@
     {
       "name": "a11y_font_size",
       "value": "調整字級大小"
+    },
+    {
+      "name": "settings_font_size_subtitle",
+      "value": "調整聊天訊息字體大小"
+    },
+    {
+      "name": "settings_font_preview",
+      "value": "預覽"
+    },
+    {
+      "name": "settings_font_preview_text",
+      "value": "這是一段示例文字，調整滑桿時字體會即時變化，放手後套用到全部對話。"
+    },
+    {
+      "name": "settings_font_level_small",
+      "value": "小"
+    },
+    {
+      "name": "settings_font_level_normal",
+      "value": "標準"
+    },
+    {
+      "name": "settings_font_level_large",
+      "value": "大"
+    },
+    {
+      "name": "settings_font_level_xlarge",
+      "value": "特大"
+    },
+    {
+      "name": "common_back",
+      "value": "返回"
+    },
+    {
+      "name": "toast_font_size_reset",
+      "value": "已恢復預設字級"
     }
   ]
 }

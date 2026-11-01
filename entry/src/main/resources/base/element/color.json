@@ -87,6 +87,14 @@
     {
       "name": "preview_backdrop",
       "value": "#E6000000"
+    },
+    {
+      "name": "slider_track",
+      "value": "#E5E5EA"
+    },
+    {
+      "name": "slider_thumb",
+      "value": "#FFFFFF"
     }
   ]
 }

@@ -251,6 +251,42 @@
     {
       "name": "a11y_font_size",
       "value": "Adjust font size"
+    },
+    {
+      "name": "settings_font_size_subtitle",
+      "value": "Adjust chat message text size"
+    },
+    {
+      "name": "settings_font_preview",
+      "value": "Preview"
+    },
+    {
+      "name": "settings_font_preview_text",
+      "value": "This is sample text. It resizes live as you drag, then applies to all chats when you let go."
+    },
+    {
+      "name": "settings_font_level_small",
+      "value": "Small"
+    },
+    {
+      "name": "settings_font_level_normal",
+      "value": "Standard"
+    },
+    {
+      "name": "settings_font_level_large",
+      "value": "Large"
+    },
+    {
+      "name": "settings_font_level_xlarge",
+      "value": "Extra large"
+    },
+    {
+      "name": "common_back",
+      "value": "Back"
+    },
+    {
+      "name": "toast_font_size_reset",
+      "value": "Default font size restored"
     }
   ]
 }

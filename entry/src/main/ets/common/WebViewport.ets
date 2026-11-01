@@ -525,6 +525,38 @@ export function buildKeyboardStateScript(keyboardUp: boolean): string {
 }
 
 /**
+ * 量一次网页正文的实际字号（CSS px），用于让设置里的「字体大小」预览与对话一致。
+ *
+ * 为什么需要它：预览卡里的样例文字是 ArkTS 自己画的，如果按「100% = 16vp」硬编码，
+ * 与站点实际正文（由站点 CSS 决定）可能差 1~2px，用户会觉得「预览和对话不一样」。
+ * 这里读站点正文段落的 computed font-size，回带数字；取不到时回带 0，
+ * 由调用方退回默认基准。
+ *
+ * 优先级：消息正文段落 → 普通 p → body，逐级兜底。
+ */
+export function buildBaseFontProbeScript(): string {
+  return `(function () {
+    try {
+      function readPx(el) {
+        if (!el) { return 0; }
+        var fs = window.getComputedStyle(el).fontSize;
+        var px = parseFloat(fs);
+        return (px > 0) ? px : 0;
+      }
+      var px = 0;
+      var md = document.querySelector('[class*="ds-markdown"] p');
+      if (md) { px = readPx(md); }
+      if (!px) { px = readPx(document.querySelector('p')); }
+      if (!px) { px = readPx(document.body); }
+      if (!px) { return '0'; }
+      return String(Math.round(px * 10) / 10);
+    } catch (e) {
+      return '0';
+    }
+  })();`;
+}
+
+/**
  * 让网页重新聚焦「当前编辑元素」并回报结果。
  *
  * 用途：应用侧确认过键盘没弹起来时调用 —— 先 `blur()` 再 `focus()` 会产生一次新的
