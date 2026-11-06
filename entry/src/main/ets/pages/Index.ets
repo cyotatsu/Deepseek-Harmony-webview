@@ -26,6 +26,7 @@ import { buildUserAgent, buildViewportFixScript, buildResizeNotifyScript,
   parseOverlayKind, OVERLAY_PREVIEW, OVERLAY_CONFIRM,
   isDismissClicked, buildComposerAutoHideScript, buildKeyboardStateScript, buildRetryFocusScript,
   buildBaseFontProbeScript,
+  buildPageThemeProbeScript,
   VIEWPORT_RESIZE_DEBOUNCE_MS } from '../common/WebViewport';
 import { buildFocusGuardScript, ENABLE_IMAGE_TAP_FOCUS_GUARD } from '../common/WebInputGuard';
 import { decideBackAction, BackContext, EXIT_CONFIRM_WINDOW_MS,
@@ -41,7 +42,7 @@ import { UploadSheet } from '../components/UploadSheet';
 import { isRefreshConfirmSkipped, setRefreshConfirmSkipped,
   isFloatingHideOnSnap, setFloatingHideOnSnap,
   isFloatingAutoSnap, setFloatingAutoSnap,
-  loadTextZoom, saveTextZoom } from '../common/UiPrefs';
+  loadTextZoom, saveTextZoom, loadWebDark, saveWebDark } from '../common/UiPrefs';
 import { KEY_FAB_HIDE_ON_SNAP, KEY_FAB_AUTO_SNAP, KEY_FAB_RESET_POS,
   KEY_WEB_TEXT_ZOOM } from '../common/AppConfig';
 import { clampTextZoom, TEXT_ZOOM_DEFAULT } from '../common/FontZoom';
@@ -70,6 +71,37 @@ const DEBUG_PROBE_INTERVAL_MS: number = 0;
  */
 const BACK_PROBE_TIMEOUT_MS: number = 500;
 
+/**
+ * 网页主题轮询间隔（ms），分两档。
+ *
+ * 站点切换深浅色是纯前端行为、不重载页面，没有事件可用，只能轮询。脚本只有一次
+ * class / 背景色读取，但没必要一直高频：启动后的头 THEME_PROBE_FAST_WINDOW_MS 用
+ * 300ms（切主题要立刻看到反馈），之后降到 2s（约 30 次/分 → 2s 档约 30 次/分的一半）。
+ */
+const THEME_PROBE_FAST_MS: number = 300;
+const THEME_PROBE_SLOW_MS: number = 2000;
+const THEME_PROBE_FAST_WINDOW_MS: number = 10000;
+
+/**
+ * 系统深浅色变化后的密集补探节奏（ms / 次数）。
+ *
+ * 站点设成「跟随系统」时，系统切色后网页要等自己的样式重算 + 重绘才落到新颜色，
+ * 这个延迟通常是几十到几百毫秒。只在事件里探一次，多半读到的还是旧值
+ * （表现为系统切了、球要等下一轮 1.2s 轮询才变）。所以按 150ms 补探 6 次，
+ * 覆盖约 900ms 的窗口，代价是 6 次极小脚本。
+ */
+const THEME_PROBE_BURST_MS: number = 150;
+const THEME_PROBE_BURST_TIMES: number = 6;
+
+/**
+ * 页面加载状态看门狗（ms）。
+ *
+ * `pageLoading` 为 true 时主题探测整体跳过。正常由 onPageEnd 复位，但导航被中断、
+ * 内核换进程等异常情况下 onPageEnd 可能不触发 —— 那样探测会**永久停摆**，
+ * 悬浮球和外壳就冻结在上一次的颜色。这里兜底强制复位。
+ */
+const PAGE_LOAD_WATCHDOG_MS: number = 15000;
+
 @Entry
 @Component
 struct Index {
@@ -93,6 +125,14 @@ struct Index {
   private initialUrl: string = DEEPSEEK_URL;
   // 系统语言适配：监听系统语言变化以重新注入 WebView
   @StorageLink('systemLanguage') @Watch('onSystemLanguageChange') systemLanguage: string = '';
+  /**
+   * 系统深浅色（EntryAbility 在 onConfigurationUpdate 里写 AppStorage）。
+   *
+   * 站点主题设成「跟随系统」时，系统一切换网页就跟着变；这里监听后立刻补探一次，
+   * 悬浮球不必等下一轮 1.2s 轮询。站点显式选了浅色/深色时网页不受影响，
+   * 探测结果不变，球也就不动 —— 这正是期望行为。
+   */
+  @StorageLink('currentColorMode') @Watch('onSystemColorModeChange') systemColorMode: number = -1;
   controller: webview.WebviewController = new webview.WebviewController();
   delegate: webview.WebDownloadDelegate = new webview.WebDownloadDelegate();
   private pageLoadTimer: number = -1;
@@ -101,6 +141,21 @@ struct Index {
   private viewportResizeTimer: number = -1;
   // 调试用诊断取样定时器（DEBUG_PROBE_INTERVAL_MS > 0 时才启动）
   private debugProbeTimer: number = -1;
+  /** 网页主题轮询定时器（站点切深浅色不重载页面，只能轮询；节奏分两档见下） */
+  private themeProbeTimer: number = -1;
+  /** 本轮轮询的起始时刻，用来判断是否已过「快速档」窗口 */
+  private themeProbeStartedAt: number = 0;
+  /**
+   * 网页是否正在加载（onPageBegin → true，onPageEnd → false）。
+   *
+   * 用途：加载期间主题探测必须跳过 —— 新文档首帧之前 body 还是空的，
+   * 探针会按「白色背景」判成浅色，导致点刷新时悬浮球先白一下再变黑。
+   */
+  private pageLoading: boolean = false;
+  /** pageLoading 的看门狗定时器（onPageEnd 不触发时兜底复位） */
+  private pageLoadWatchdogTimer: number = -1;
+  /** 系统切色后的密集补探定时器集合（切后台/页面销毁时要清掉） */
+  private themeBurstTimers: number[] = [];
   // 2in1/PC 设备标识：用于返回按钮
   @State isPC: boolean = false;
   // 返回按钮：2in1 设备上访问非 DeepSeek 域名且有回退历史时显示
@@ -135,7 +190,13 @@ struct Index {
   // 设置面板开关
   @State showSettings: boolean = false;
   // 正在拖动字号滑块：用于冻结预览卡高度，保证滑轨不在手指底下移动
-  @State fontDragging: boolean = false;
+  /**
+   * 网页当前是否深色主题（由 probePageTheme 探测）。
+   *
+   * 悬浮球用它决定配色：站点自己的主题切换与系统深浅色无关，
+   * 只跟系统走的话球会与网页底色撞在一起（白底白图标）。
+   */
+  @State webIsDark: boolean = false;
   // 设置面板是否停在「字体大小」子页（列表 → 字号页）
   @State fontPage: boolean = false;
   // 网页正文的实际字号（CSS px），供设置里的字号预览对齐；测不到时用 16
@@ -152,6 +213,8 @@ struct Index {
     this.setupKeyboardAvoid();
     this.restoreUiPrefs();
     this.startDebugProbe();
+    // 网页主题轮询：站点在网页里自己切深浅色时，悬浮球配色要跟着变
+    this.startThemeProbe();
     // 冷启动携带的 DeepLink 直接作为 Web 的初始 src。
     // 不能等到 onPageShow 再 loadUrl —— 那会比 onControllerAttached 早约 35ms，
     // 控制器尚未绑定必然抛异常；即便推迟到 onControllerAttached，
@@ -193,6 +256,10 @@ struct Index {
       clearInterval(this.debugProbeTimer);
       this.debugProbeTimer = -1;
     }
+    this.stopThemeProbe();
+    // 清掉系统切色的密集补探与加载看门狗，避免页面销毁后还有定时器回调打到已释放的控制器
+    this.clearThemeBurstProbe();
+    this.clearPageLoadWatchdog();
     // 释放挂起的文件选择回调：它是 onShowFileSelector 存下的闭包，持有 Web 侧的
     // FileSelectorResult。页面销毁后不会再有人调用它，留着会让事件结果与页面对象
     // 无法回收（用户打开上传框后直接退出页面就会走到这里）。
@@ -352,6 +419,11 @@ struct Index {
           })
           .onPageBegin((event) => {
             this.isLoading = true;
+            // 主题探测在加载期间一律跳过：新文档首帧之前 body 是空的，
+            // 探到的「浅色」是假值，会让悬浮球先白一下。见 probePageTheme。
+            this.pageLoading = true;
+            // 上看门狗：onPageEnd 万一不触发，15s 后强制放行，否则主题探测永久停摆。
+            this.armPageLoadWatchdog();
             this.isError = false;
             this.isNetworkError = false;
             this.startLoadTimeout();
@@ -368,6 +440,14 @@ struct Index {
           })
           .onPageEnd(() => {
             this.isLoading = false;
+            this.pageLoading = false;
+            this.clearPageLoadWatchdog();
+            // 每次导航结束都重新进入「快速档」：用户刚打开/切换会话时最可能去改主题，
+            // 这 10s 里用 300ms 探，之后自然回落到 2s。
+            // 只在轮询已运行时重置（页面在后台时轮询是停的，不该因为加载结束又醒过来）。
+            if (this.themeProbeTimer !== -1) {
+              this.themeProbeStartedAt = Date.now();
+            }
             // 只撤销「超时」这一暂时性判断：超时后页面若最终加载成功，错误页必须撤掉，
             // 否则慢网下用户会看着一个已经加载好的页面被错误页盖住。
             // 确定性失败（HTTP 4xx/5xx、主框架网络错误）**不能**在这里清 ——
@@ -402,6 +482,8 @@ struct Index {
             this.probeViewport();
             // 页面加载完量一次正文字号，让设置里的「字体大小」预览与对话一致
             this.probeWebBaseFont();
+            // 页面加载完也探测一次网页主题（悬浮球配色跟网页走）
+            this.probePageTheme();
             this.updateBackButtonState();
           })
           .onErrorReceive((event) => {
@@ -602,6 +684,7 @@ struct Index {
         if (this.isError) {
           ErrorView({
             isNetworkError: this.isNetworkError,
+            webDark: this.webIsDark,
             onRetry: () => this.onErrorRetry()
           })
         }
@@ -609,6 +692,7 @@ struct Index {
         // 上传方式选择模态框（内容见 components/UploadSheet.ets）
         if (this.showUploadModal) {
           UploadSheet({
+            webDark: this.webIsDark,
             onTakePhoto: () => this.handleTakePhoto(),
             onPickFromAlbum: () => this.handlePickFromAlbum(),
             onPickFile: () => this.handlePickFile(),
@@ -647,6 +731,7 @@ struct Index {
           winY: 0,
           // 刷新按钮常显：设置面板里那个开关已移除（见 SettingsSheet 说明）
           refreshEnabled: true,
+          webDark: this.webIsDark,
           onRefresh: () => this.onFloatingRefresh(),
           onOpenSettings: () => {
             this.showSettings = true;
@@ -688,7 +773,9 @@ struct Index {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor($r('app.color.web_background'))
+    // 根容器底色跟随网页主题：顶部状态栏区域没有网页覆盖，透出的就是这块颜色。
+    // 用 app.color.web_background 只跟系统走，站点独立切深色时顶部会留一条白边。
+    .backgroundColor(this.webIsDark ? '#FF1A1A1A' : '#FFFFFFFF')
     // 顶部按状态栏避让高度补 padding —— 底部保持 0，内容自然延伸到透明的手势导航条之下，
     // 即「顶部正常状态栏 + 底部沉浸」。详见 setupKeyboardAvoid 的说明。
     .padding({ top: this.statusBarHeightVp, bottom: 0 })
@@ -704,7 +791,9 @@ struct Index {
       // 列表页用默认的 LARGE；字号页按内容高度收成一张卡片（FIT_CONTENT），
       // 否则默认高度会在底部留一大片空白。
       height: this.fontPage ? SheetSize.FIT_CONTENT : SheetSize.LARGE,
-      backgroundColor: $r('app.color.surface_card'),
+      // 面板底色跟着网页深浅色走。用 app.color.surface_card 只会跟系统走，
+      // 站点独立切深色时面板会保持惨白（与内部内容配色打架）。
+      backgroundColor: this.webIsDark ? '#2A2A2A' : '#FFFFFF',
       // 遮罩改由页面自己的捕获层绘制（见 build() 里 showSettings 分支）：
       // 开了 enableOutsideInteractive 之后系统遮罩不再绘制，平板端就会「没有遮罩」；
       // 自己画一份，两端表现才一致。
@@ -721,7 +810,6 @@ struct Index {
       showClose: false,
       onDisappear: () => {
         this.showSettings = false;
-        this.fontDragging = false;
         this.fontPage = false;
       }
     })
@@ -735,7 +823,68 @@ struct Index {
     this.refreshPage();
   }
 
+  /**
+   * 系统深浅色变化：短时间内密集补探网页主题。
+   *
+   * 为什么不是探一次：站点设成「跟随系统」时，网页是在自己的样式重算后才变色的，
+   * 事件到达这一刻多半还是旧值。单次探测会和 1.2s 轮询等价，用户能感觉到延迟。
+   * 这里按 THEME_PROBE_BURST_MS 连探 THEME_PROBE_BURST_TIMES 次，覆盖重绘窗口。
+   */
+  onSystemColorModeChange(): void {
+    this.clearThemeBurstProbe();
+    for (let i = 0; i < THEME_PROBE_BURST_TIMES; i++) {
+      const id: number = setTimeout(() => {
+        this.probePageTheme();
+      }, THEME_PROBE_BURST_MS * (i + 1));
+      this.themeBurstTimers.push(id);
+    }
+  }
+
+  private clearThemeBurstProbe(): void {
+    for (const id of this.themeBurstTimers) {
+      clearTimeout(id);
+    }
+    this.themeBurstTimers = [];
+  }
+
+  /**
+   * 给 pageLoading 上看门狗。
+   *
+   * onPageEnd 在导航中断等异常路径下不一定触发，而 pageLoading 为 true 时
+   * 主题探测整体跳过 —— 没有兜底就会永久停摆。
+   */
+  private armPageLoadWatchdog(): void {
+    this.clearPageLoadWatchdog();
+    this.pageLoadWatchdogTimer = setTimeout(() => {
+      this.pageLoadWatchdogTimer = -1;
+      if (this.pageLoading) {
+        hilog.warn(DOMAIN, TAG, 'onPageEnd missing, reset pageLoading');
+        this.pageLoading = false;
+      }
+    }, PAGE_LOAD_WATCHDOG_MS);
+  }
+
+  private clearPageLoadWatchdog(): void {
+    if (this.pageLoadWatchdogTimer !== -1) {
+      clearTimeout(this.pageLoadWatchdogTimer);
+      this.pageLoadWatchdogTimer = -1;
+    }
+  }
+
+  /**
+   * 切到后台时停掉主题轮询：轮询只为「网页里切深浅色」服务，
+   * 后台时页面不可见，没必要每秒唤起一次 JS。
+   */
+  onPageHide(): void {
+    this.stopThemeProbe();
+    // 后台期间网页不会换主题，补探队列留着没有意义（也会白唤起 JS）
+    this.clearThemeBurstProbe();
+  }
+
   onPageShow(): void {
+    // 回到前台恢复轮询（不在这里立刻探一次：冷启动时 Web 控制器还没挂上，
+    // runJavaScript 会抛异常；轮询 1.2s 内就会自己探到）。
+    this.startThemeProbe();
     if (this.deepLinkUrl && this.deepLinkUrl !== '') {
       this.navigateToUrl(this.deepLinkUrl);
       AppStorage.setOrCreate<string>('deepLinkUrl', '');
@@ -1277,7 +1426,7 @@ struct Index {
     try {
       this.controller.runJavaScript(buildBaseFontProbeScript())
         .then((result: string) => {
-          const px: number = Number(result);
+          const px: number = Number(this.unwrapJsString(result));
           // 只接受合理区间：站点正文字号通常在 12~24px，越界视为异常值
           if (!isNaN(px) && px >= 10 && px <= 32) {
             this.webBaseFontPx = Math.round(px * 10) / 10;
@@ -1288,6 +1437,131 @@ struct Index {
         });
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'Failed to probe base font');
+    }
+  }
+
+  /**
+   * 探测网页当前是深色还是浅色，结果写进 `webIsDark` 供悬浮球配色使用。
+   *
+   * 站点有自己的「系统设置 → 主题」，与系统深浅色互不相干；而且**切换主题不会重新
+   * 加载页面**（SPA），onPageEnd 不会触发。所以除了页面加载完探测一次，还在前台
+   * 按固定间隔轮询（见 themeProbeTimer）—— 一次极小脚本，开销可忽略。
+   */
+  /**
+   * 把 `runJavaScript` 的返回值还原成裸字符串。
+   *
+   * ArkWeb 回传的是 **JSON 编码后的结果**：JS 里 `return '1'` 到 ArkTS 侧拿到的是
+   * `"1"`（带引号）。直接 trim 后与 '1' 比较永远不相等，主题探测会一直判成浅色。
+   */
+  private unwrapJsString(result: string): string {
+    let text: string = String(result).trim();
+    if (text.length >= 2 && text.charAt(0) === '"' && text.charAt(text.length - 1) === '"') {
+      text = text.substring(1, text.length - 1);
+    }
+    return text;
+  }
+
+  private probePageTheme(): void {
+    // 加载中不探测：此时文档内容尚未就位，探到的颜色是假值（会闪一下浅色）。
+    if (this.pageLoading) {
+      return;
+    }
+    try {
+      this.controller.runJavaScript(buildPageThemeProbeScript())
+        .then((result: string) => {
+          const raw: string = this.unwrapJsString(result);
+          // 只认 '1' / '0'；'x' 表示文档还没就绪，保留上一次的结论
+          if (raw !== '1' && raw !== '0') {
+            return;
+          }
+          const dark: boolean = raw === '1';
+          if (dark !== this.webIsDark) {
+            this.webIsDark = dark;
+            hilog.info(DOMAIN, TAG, 'page theme changed, dark=%{public}s', dark ? 'true' : 'false');
+            // 记下来：下次启动先按这个状态渲染，探测到真实值后再纠正
+            try {
+              const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+              saveWebDark(ctx, dark);
+            } catch (err) {
+              hilog.warn(DOMAIN, TAG, 'Failed to persist page theme');
+            }
+            // 状态栏跟着网页走（面板/弹窗在各自的组件里按 webDark 取色）。
+            this.syncStatusBar(dark);
+          }
+        })
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'theme probe failed: %{public}d', err.code);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to probe page theme');
+    }
+  }
+
+  /**
+   * 状态栏文字色跟随网页深浅色。
+   *
+   * 只改状态栏，**不要**调用 ApplicationContext.setColorMode：
+   * 那会把整个应用的资源模式翻过去，连带改变 Web 内核上报的 prefers-color-scheme，
+   * 于是站点选「跟随系统」时永远被重新判成深色（系统浅色也切不回来）。
+   * 面板与弹窗的配色改由 webDark 逐组件传入（见 common/UiPalette.ets）。
+   */
+  private syncStatusBar(dark: boolean): void {
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      window.getLastWindow(ctx).then((win: window.Window) => {
+        // 状态栏是全屏沉浸下透明的，露出来的是**窗口底色**，
+        // 只改文字色会留下一条白边（网页深色时尤其明显），所以底色一起改。
+        try {
+          win.setWindowBackgroundColor(dark ? '#FF1A1A1A' : '#FFFFFFFF');
+        } catch (err) {
+          hilog.warn(DOMAIN, TAG, 'setWindowBackgroundColor not supported');
+        }
+        win.setWindowSystemBarProperties({
+          statusBarContentColor: dark ? '#FFFFFF' : '#000000',
+          // 底部手势条 / 导航条的图标色也要跟着走：只改状态栏时，
+          // 深色网页下底部还留着一条浅色的手势条，与整体不搭。
+          navigationBarContentColor: dark ? '#FFFFFF' : '#000000'
+        }).catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'setWindowSystemBarProperties failed: %{public}d', err.code);
+        });
+      }).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'getLastWindow failed: %{public}d', err.code);
+      });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to sync status bar');
+    }
+  }
+
+  /**
+   * 启动 / 停止主题轮询。
+   *
+   * 节奏分两段（见 THEME_PROBE_FAST_MS / SLOW_MS）：
+   *   · 启动后的头 10s 用 300ms，覆盖「刚进页面就切主题」「从网页设置里改颜色」这些
+   *     需要立刻看到反应的场景；
+   *   · 之后降到 2s —— 用户多半已经稳定在某个主题上，没必要一直高频唤起 JS。
+   * 用 setTimeout 自调度而不是 setInterval：发现主题变化后可以立刻切到下一档间隔。
+   */
+  private startThemeProbe(): void {
+    this.stopThemeProbe();
+    this.themeProbeStartedAt = Date.now();
+    this.scheduleThemeProbe(THEME_PROBE_FAST_MS);
+  }
+
+  private scheduleThemeProbe(delay: number): void {
+    this.themeProbeTimer = setTimeout(() => {
+      this.themeProbeTimer = -1;
+      this.probePageTheme();
+      const elapsed: number = Date.now() - this.themeProbeStartedAt;
+      this.scheduleThemeProbe(elapsed < THEME_PROBE_FAST_WINDOW_MS
+        ? THEME_PROBE_FAST_MS
+        : THEME_PROBE_SLOW_MS);
+    }, delay);
+  }
+
+  private stopThemeProbe(): void {
+    if (this.themeProbeTimer !== -1) {
+      clearTimeout(this.themeProbeTimer);
+      this.themeProbeTimer = -1;
     }
   }
 
@@ -1831,6 +2105,11 @@ struct Index {
       // 网页文字缩放：读入 AppStorage，Web 组件的 textZoomRatio 直接消费。
       // 必须在这里（组件首次布局前）恢复，否则会先按 100% 渲染一帧再跳变。
       this.webTextZoom = loadTextZoom(ctx);
+      // 悬浮球配色：先用**上次退出时**的网页深浅色渲染，避免每次冷启动都先闪一下浅色。
+      // 页面加载完成 / 轮询探测到真实主题后会自动纠正（见 probePageTheme）。
+      this.webIsDark = loadWebDark(ctx);
+      // 状态栏也先按上次的网页主题同步，避免冷启动先亮一下再翻。
+      this.syncStatusBar(this.webIsDark);
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'Failed to restore UI prefs');
     }
@@ -1858,11 +2137,13 @@ struct Index {
    * 用 @CustomDialog 自定义弹窗内容（见 components/RefreshConfirmDialog.ets），
    * 内部用官方 Checkbox 组件实现「不再显示」。
    *
-   * customStyle 保持默认 false：由框架提供弹窗容器（含圆角与背景），
-   * 组件只负责内部内容，尺寸最稳妥。
+   * customStyle 为 true：弹窗容器的底色取自**系统**深浅色，而组件内的文字颜色
+   * 跟的是**网页**深浅色（见 common/UiPalette.ets），两者不一致时会出现白底白字，
+   * 所以卡片背景改由组件自己画。
    */
   private refreshConfirmDialog: CustomDialogController = new CustomDialogController({
     builder: RefreshConfirmDialog({
+      webDark: this.webIsDark,
       noMore: $noMoreRefreshPrompt,
       onConfirm: (noMore: boolean) => {
         this.onRefreshConfirmed(noMore);
@@ -1872,7 +2153,10 @@ struct Index {
       }
     }),
     autoCancel: true,
-    alignment: DialogAlignment.Center
+    alignment: DialogAlignment.Center,
+    // 卡片外观由组件自己画：默认容器底色取自系统深浅色，与「跟随网页」的文字颜色冲突，
+    // 见 components/RefreshConfirmDialog.ets
+    customStyle: true
   });
 
   // 弹出刷新确认框（调用方已确认用户没有勾选过「不再显示」）
@@ -1934,9 +2218,10 @@ struct Index {
     SettingsSheet({
       hideOnSnap: this.fabHideOnSnap,
       autoSnap: this.fabAutoSnap,
+      // 面板配色跟着网页深浅色走（app.color.* 只跟系统走，站点可以独立切深色）
+      webDark: this.webIsDark,
       // 字号用 $ 双向绑定到 AppStorage：拖动滑块时 Web 的 textZoomRatio 实时跟随
       fontSize: $webTextZoom,
-      fontDragging: $fontDragging,
       bottomInset: this.bottomSafeInsetVp,
       fontPage: $fontPage,
       baseFontPx: this.webBaseFontPx,

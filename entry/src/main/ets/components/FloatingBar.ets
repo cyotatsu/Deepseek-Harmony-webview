@@ -46,6 +46,14 @@ export struct FloatingBar {
   @Prop winY: number = 0;
   /** 刷新子按钮是否启用（开关在设置面板里，状态由页面持有） */
   @Prop refreshEnabled: boolean = true;
+  /**
+   * 网页当前是不是深色主题（由页面探测后传入）。
+   *
+   * 为什么不能用 app.color.* 资源：那些资源只跟随**系统**深浅色。站点自己的
+   * 「系统设置 → 主题」可以在系统为浅色时把网页切成深色，这时按钮沿用系统资源
+   * 就会出现「白底白图标 / 黑底黑图标」。所以按钮底色跟**网页**走。
+   */
+  @Prop webDark: boolean = false;
 
   // ── 来自设置面板（经 AppStorage，二者无直接引用）──
   /** 左右贴边时是否半隐藏 */
@@ -435,6 +443,32 @@ export struct FloatingBar {
   private keyboardLiftVp(): number {
     return keyboardLift(this.btnCx, this.btnCy, this.boundsH(), this.keyboardHeightVp,
       this.FAB_SIZE, this.DRAG_MARGIN, this.isDragging);
+  }
+
+  // ── 悬浮球配色（跟网页主题走，见 webDark 的注释）──
+  /** 常态底色：浅色透白 / 深色透黑 */
+  private fabBg(): string {
+    return this.webDark ? '#E62C2C2E' : '#E6FFFFFF';
+  }
+
+  /** 按下 / 拖动态底色：比常态略深一档 */
+  private fabBgActive(): string {
+    return this.webDark ? '#F23A3A3C' : '#F2E8F0FA';
+  }
+
+  /** 描边色：浅色淡灰收边 / 深色 30% 白圈（黑底上仍然有轮廓） */
+  private fabBorder(): string {
+    return this.webDark ? '#1FFFFFFF' : '#14000000';
+  }
+
+  /** 图标色：浅色品牌蓝 / 深色纯白 */
+  private fabIcon(): string {
+    return this.webDark ? '#FFFFFF' : '#4D6BFE';
+  }
+
+  /** 阴影色：深色下要更重才立得起来 */
+  private fabShadow(): string {
+    return this.webDark ? '#CC000000' : '#1A000000';
   }
 
   /** 命中框（页面坐标）：只包住主按钮 + 展开后的子按钮，用于拦住下层网页 */
@@ -1032,16 +1066,16 @@ export struct FloatingBar {
       SymbolGlyph(symbol)
         .fontSize(25)
         .fontWeight(FontWeight.Regular)
-        .fontColor([$r('app.color.floating_button_icon')])
+        .fontColor([this.fabIcon()])
         .renderingStrategy(SymbolRenderingStrategy.SINGLE)
     }
     .width(this.SUB_SIZE)
     .height(this.SUB_SIZE)
     .borderRadius(this.SUB_SIZE / 2)
-    .backgroundColor($r('app.color.floating_button_bg'))
-    // 一圈描边：深色模式是纯黑底 + 纯白描边（完全黑白），浅色是淡灰收边。
-    .border({ width: 1, color: $r('app.color.floating_button_border') })
-    .shadow({ radius: 10, color: $r('app.color.floating_button_shadow'), offsetY: 3 })
+    .backgroundColor(this.fabBg())
+    // 一圈描边：深色是黑底 + 30% 白描边，浅色是淡灰收边。
+    .border({ width: 1, color: this.fabBorder() })
+    .shadow({ radius: 10, color: this.fabShadow(), offsetY: 3 })
     .opacity(this.isExpanded ? 1 : 0)
     // 错峰：离主按钮越远的子按钮，展开时越晚一点出现、收起时越早消失 —— 更有"弹出"的层次感
     .animation({
@@ -1082,7 +1116,7 @@ export struct FloatingBar {
       SymbolGlyph($r('sys.symbol.line_3_horizontal'))
         .fontSize(this.isDragging ? 32 : 30)
         .fontWeight(this.isDragging ? FontWeight.Medium : FontWeight.Regular)
-        .fontColor([$r('app.color.floating_button_icon')])
+        .fontColor([this.fabIcon()])
         .renderingStrategy(SymbolRenderingStrategy.SINGLE)
     }
     .width(this.FAB_SIZE)
@@ -1091,20 +1125,18 @@ export struct FloatingBar {
     // 拖动态高亮：与上一版一致 —— 底色提亮 + 阴影加深 + 整体放大。
     // 刻意**不加描边**：上一版没有描边，加了反而显得突兀；
     // 放大倍数也回到 1.12（上一版的观感），而 1.22 偏夸张。
-    .backgroundColor(this.isDragging
-      ? $r('app.color.floating_button_bg_active')
-      : $r('app.color.floating_button_bg'))
+    .backgroundColor(this.isDragging ? this.fabBgActive() : this.fabBg())
     // 描边：拖动时用强调色（高亮反馈），平时用资源色 —— 深色模式下是 30% 白圈，
     // 保证按钮在黑色网页上依然有清晰轮廓。
     // 拖动态用**加粗描边**表达（而不是把底色翻白）：
     // 深色模式是纯黑底 + 纯白图标，若拖动态翻成白底，白图标会看不见。
     .border({
       width: this.isDragging ? 3 : 1,
-      color: this.isDragging ? $r('app.color.floating_button_icon') : $r('app.color.floating_button_border')
+      color: this.isDragging ? this.fabIcon() : this.fabBorder()
     })
     .shadow({
       radius: this.isDragging ? 20 : 12,
-      color: $r('app.color.floating_button_shadow'),
+      color: this.fabShadow(),
       offsetY: this.isDragging ? 8 : 4
     })
     .scale({

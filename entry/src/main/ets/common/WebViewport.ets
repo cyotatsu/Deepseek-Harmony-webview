@@ -557,6 +557,81 @@ export function buildBaseFontProbeScript(): string {
 }
 
 /**
+ * 探测网页当前是深色还是浅色主题。
+ *
+ * 为什么需要：悬浮球是 ArkUI 组件，颜色取自 app.color.*，而 app.color.* 只跟随
+ * **系统**深浅色。站点自己的「系统设置 → 主题」可以在系统为浅色时把网页切成深色
+ *（或反之），这时按钮会与网页底色打架（白底白图标 / 黑底黑图标）。
+ *
+ * 判定顺序（任一成立即深色）：
+ *   1. <html> 或 <body> 带 dark 类名 / data-theme="dark" / data-color-mode="dark"
+ *   2. <html> 的 color-scheme 计算值含 dark
+ *   3. body 背景色的相对亮度 < 0.5（兜底：站点换实现方式时也不会立刻失效）
+ *
+ * 返回 '1' 深色 / '0' 浅色 / 'x' 未知（文档未就绪或读取异常）；调用方只在拿到 0/1 时更新。
+ */
+export function buildPageThemeProbeScript(): string {
+  return `(function () {
+    try {
+      var html = document.documentElement;
+      var body = document.body;
+      // 文档还没就绪（刚点完刷新 / 新页面首帧之前）时返回未知 'x'：
+      // 此刻 body 里没有任何内容，按背景色兜底会得到白色 → 被误判成「浅色主题」，
+      // 悬浮球就会先白一下再变回深色。宁可这次不更新，也不要用假数据覆盖已知状态。
+      if (!html || !body || document.readyState === 'loading' || !body.firstElementChild) {
+        return 'x';
+      }
+      function hasDarkMark(el) {
+        if (!el) { return false; }
+        var cls = el.className;
+        if (typeof cls === 'string' && /(^|\\s)dark(\\s|$)/i.test(cls)) { return true; }
+        var dt = el.getAttribute && el.getAttribute('data-theme');
+        if (dt && dt.toLowerCase() === 'dark') { return true; }
+        var dm = el.getAttribute && el.getAttribute('data-color-mode');
+        if (dm && dm.toLowerCase() === 'dark') { return true; }
+        var ds = el.getAttribute && el.getAttribute('data-scheme');
+        if (ds && ds.toLowerCase() === 'dark') { return true; }
+        return false;
+      }
+      function hasLightMark(el) {
+        if (!el) { return false; }
+        var cls = el.className;
+        if (typeof cls === 'string' && /(^|\\s)light(\\s|$)/i.test(cls)) { return true; }
+        var dt = el.getAttribute && el.getAttribute('data-theme');
+        if (dt && dt.toLowerCase() === 'light') { return true; }
+        return false;
+      }
+      if (hasDarkMark(html) || hasDarkMark(body)) { return '1'; }
+      // 站点把主题写在 body 的类名里（实测：zh_CN light / zh_CN dark）。
+      // 认到显式 light 就提前返回，避免下面按背景色猜时被透明底误导。
+      if (hasLightMark(html) || hasLightMark(body)) { return '0'; }
+      var cs = window.getComputedStyle(html).colorScheme || '';
+      if (cs.toLowerCase().indexOf('dark') >= 0) { return '1'; }
+      // 背景色可能挂在 html 上、也可能挂在 body 上（body 常常是透明的），逐个试
+      var els = [body, html];
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        if (!el) { continue; }
+        var bg = window.getComputedStyle(el).backgroundColor || '';
+        var m = bg.match(/rgba?\(([^)]+)\)/);
+        if (!m) { continue; }
+        var parts = m[1].split(',');
+        var r = parseFloat(parts[0]) || 0;
+        var g = parseFloat(parts[1]) || 0;
+        var b = parseFloat(parts[2]) || 0;
+        var a = (parts.length > 3) ? parseFloat(parts[3]) : 1;
+        if (a <= 0.5) { continue; }
+        var lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+        return (lum < 0.5) ? '1' : '0';
+      }
+      return '0';
+    } catch (e) {
+      return '0';
+    }
+  })();`;
+}
+
+/**
  * 让网页重新聚焦「当前编辑元素」并回报结果。
  *
  * 用途：应用侧确认过键盘没弹起来时调用 —— 先 `blur()` 再 `focus()` 会产生一次新的

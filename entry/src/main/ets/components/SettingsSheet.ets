@@ -1,6 +1,7 @@
 import { promptAction } from '@kit.ArkUI';
 import { TEXT_ZOOM_MIN, TEXT_ZOOM_MAX, TEXT_ZOOM_STEP,
   normalizeTextZoom, formatTextZoom } from '../common/FontZoom';
+import { UiPalette, uiPalette } from '../common/UiPalette';
 
 /**
  * 设置面板内容（官方半模态组件 bindSheet 的内容区）。
@@ -33,15 +34,6 @@ export struct SettingsSheet {
   onCommitFontSize: (zoom: number) => void = () => {};
   onResetFontSize: () => void = () => {};
 
-  /**
-   * 是否正在拖动字号滑块。
-   *
-   * 拖动时面板只留调节条：标题栏与其它设置项用 visibility Hidden 隐藏（Hidden 仍占位，
-   * 因此滑块不会跳动），面板底色与遮罩同时转透明，对话界面原样露出；松手立刻恢复。
-   * 状态放在 Index，是因为遮罩色与面板底色都是 bindSheet 的选项。
-   */
-  @Link fontDragging: boolean;
-
   /** 是否停在「字体大小」子页（列表 → 字号页），由列表里的字号行进入 */
   @Link fontPage: boolean;
 
@@ -54,6 +46,17 @@ export struct SettingsSheet {
    * 手势条上、不好点；这里按它补出底部留白。
    */
   @Prop bottomInset: number = 0;
+  /**
+   * 网页当前是否深色主题。
+   *
+   * 面板配色不能只靠 app.color.*（那套只跟随系统深浅色）：站点可以独立切成深色，
+   * 不同步就会出现「网页全黑、面板惨白」。由页面把它传进来，见 common/UiPalette.ets。
+   */
+  @Prop webDark: boolean = false;
+
+  private pal(): UiPalette {
+    return uiPalette(this.webDark);
+  }
 
   /** 字号调节条：轨道厚度 / 圆点直径 / 控件高度（vp）——参考图是「粗胶囊轨道 + 白色圆点」 */
   private readonly SLIDER_TRACK_H: number = 14;
@@ -75,21 +78,21 @@ export struct SettingsSheet {
     return Math.max(this.FONT_BOTTOM_PAD, this.bottomInset + 12);
   }
 
-  /** 当前生效的卡片高度：拖动中用冻结值，其余时候用实测值 */
-  private effectiveCardH(): number {
-    return this.fontDragging ? this.frozenCardH : this.cardH();
-  }
-
   /** 字号页里除预览卡之外的固定高度（含底部留白） */
   private fontBaseH(): number {
     return this.FONT_PAGE_BASE_H + this.bottomPad();
   }
-  /** 样例文字的实测高度（vp）：文字只按宽度换行，高度不受面板高度约束，可放心用来算整页高度 */
-  @State previewTextH: number = 51;
+  /**
+   * 样例文字的**预留**高度（vp）。
+   *
+   * 它量的是「按最大字号排版时」的高度，而不是当前字号 —— 这样卡片在整个
+   * 80%~160% 区间内高度恒定：
+   *   · 文字再大也不会溢出卡片、压到下面的档位行上（之前的表现是重叠）；
+   *   · 卡片高度不变 → 下面的调节条不会在手指底下上下移动。
+   */
+  @State previewTextH: number = 100;
   /** 卡片里除样例文字外的固定开销：小标题 + 间距 + 上下内边距 */
   private readonly PREVIEW_CHROME_H: number = 55;
-  /** 拖动开始那一刻的预览卡高度：拖动中按它冻结，滑块不会被增高的卡片顶走 */
-  @State frozenCardH: number = 106;
 
   onClearCache: () => void = () => {};
   onOpenFeedback: () => void = () => {};
@@ -100,7 +103,7 @@ export struct SettingsSheet {
   sectionTitle(text: Resource) {
     Text(text)
       .fontSize(12)
-      .fontColor($r('app.color.text_secondary'))
+      .fontColor(this.pal().textSecondary)
       .width('100%')
       .padding({ left: 20, right: 20, top: 18, bottom: 6 })
   }
@@ -111,10 +114,10 @@ export struct SettingsSheet {
     Column() {
       Text(title)
         .fontSize(15)
-        .fontColor($r('app.color.text_primary'))
+        .fontColor(this.pal().textPrimary)
       Text(desc)
         .fontSize(12)
-        .fontColor($r('app.color.text_secondary'))
+        .fontColor(this.pal().textSecondary)
         .margin({ top: 3 })
     }
     .alignItems(HorizontalAlign.Start)
@@ -156,6 +159,12 @@ export struct SettingsSheet {
     return Math.round(this.previewTextH + this.PREVIEW_CHROME_H);
   }
 
+  /** 样例文字按**最大字号**排版时的字号：只用于撑出预留空间，不参与显示 */
+  private fpSizeMax(): number {
+    const base: number = this.baseFontPx > 0 ? this.baseFontPx : 16;
+    return Math.round(base * TEXT_ZOOM_MAX / 100 * 10) / 10;
+  }
+
   /** 字号页标题栏：返回 + 标题/副标题 + 关闭 */
   @Builder
   fontHeader() {
@@ -163,12 +172,12 @@ export struct SettingsSheet {
       Row() {
         SymbolGlyph($r('sys.symbol.chevron_left'))
           .fontSize(18)
-          .fontColor([$r('app.color.text_primary')])
+          .fontColor([this.pal().textPrimary])
       }
       .width(40)
       .height(40)
       .borderRadius(20)
-      .backgroundColor($r('app.color.surface_tile'))
+      .backgroundColor(this.pal().tile)
       .justifyContent(FlexAlign.Center)
       .alignItems(VerticalAlign.Center)
       .accessibilityText($r('app.string.common_back'))
@@ -180,10 +189,10 @@ export struct SettingsSheet {
         Text($r('app.string.settings_font_size'))
           .fontSize(20)
           .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.text_primary'))
+          .fontColor(this.pal().textPrimary)
         Text($r('app.string.settings_font_size_subtitle'))
           .fontSize(12)
-          .fontColor($r('app.color.text_secondary'))
+          .fontColor(this.pal().textSecondary)
           .maxLines(1)
           .margin({ top: 2 })
       }
@@ -194,12 +203,12 @@ export struct SettingsSheet {
       Row() {
         SymbolGlyph($r('sys.symbol.xmark'))
           .fontSize(16)
-          .fontColor([$r('app.color.text_secondary')])
+          .fontColor([this.pal().textSecondary])
       }
       .width(40)
       .height(40)
       .borderRadius(20)
-      .backgroundColor($r('app.color.surface_tile'))
+      .backgroundColor(this.pal().tile)
       .justifyContent(FlexAlign.Center)
       .alignItems(VerticalAlign.Center)
       .accessibilityText($r('app.string.common_close'))
@@ -226,40 +235,53 @@ export struct SettingsSheet {
         Column() {
           Text($r('app.string.settings_font_preview'))
             .fontSize(12)
-            .fontColor($r('app.color.text_secondary'))
-          Text($r('app.string.settings_font_preview_text'))
-            .fontSize(this.fpSize())
-            .lineHeight(this.fpSize() * 1.6)
-            .fontColor($r('app.color.text_primary'))
-            .margin({ top: 6 })
-            // 只测文字高度：它按宽度换行、不受面板高度约束，所以不会出现
-            // 「面板高度依赖卡片、卡片高度又被面板限制」的循环
-            .onAreaChange((oldArea: Area, newArea: Area) => {
-              const h: number = Number(newArea.height);
-              if (!isNaN(h) && h > 8 && Math.abs(h - this.previewTextH) > 0.5) {
-                this.previewTextH = h;
-              }
-            })
+            .fontColor(this.pal().textSecondary)
+          // Stack 取「最高的那个子节点」当高度：隐形副本按**最大字号**排版，
+          // 因此卡片高度恒为最大字号所需高度，可见文字再大也不会溢出。
+          Stack({ alignContent: Alignment.TopStart }) {
+            // 隐形副本：只负责占位（Visibility.Hidden 仍参与布局），不可见
+            Text($r('app.string.settings_font_preview_text'))
+              .width('100%')
+              .fontSize(this.fpSizeMax())
+              .lineHeight(this.fpSizeMax() * 1.6)
+              .visibility(Visibility.Hidden)
+
+            // 可见文字：跟随当前字号实时变化
+            Text($r('app.string.settings_font_preview_text'))
+              .width('100%')
+              .fontSize(this.fpSize())
+              .lineHeight(this.fpSize() * 1.6)
+              .fontColor(this.pal().textPrimary)
+          }
+          .width('100%')
+          .margin({ top: 6 })
+          // 量一次预留高度（最大字号排版高度）：它只受宽度影响，与面板高度无关，
+          // 因此不会出现「面板高度依赖卡片、卡片高度又被面板限制」的循环
+          .onAreaChange((oldArea: Area, newArea: Area) => {
+            const h: number = Number(newArea.height);
+            if (!isNaN(h) && h > 8 && Math.abs(h - this.previewTextH) > 0.5) {
+              this.previewTextH = h;
+            }
+          })
         }
         .width('100%')
-        // 卡片高度＝样例文字实测高度 + 固定开销：刚好包住文字，下面不留空白。
-        // 拖动中改用进入拖动那一刻的冻结值：否则字号变大使卡片变高，会把下面的
-        // 调节条一路往下顶（手指底下的滑轨跑掉）。
-        .height(this.effectiveCardH())
+        // 卡片高度＝「最大字号排版高度 + 固定开销」：整个调节区间内恒定，
+        // 文字不会溢出压到下面的行，调节条也不会被撑高的卡片顶走。
+        .height(this.cardH())
         .alignItems(HorizontalAlign.Start)
         .padding(16)
         .borderRadius(14)
-        .backgroundColor($r('app.color.surface_tile'))
+        .backgroundColor(this.pal().tile)
 
         // 名称 + 档位 + 当前值
         Row() {
           Column() {
             Text($r('app.string.settings_font_size'))
               .fontSize(15)
-              .fontColor($r('app.color.text_primary'))
+              .fontColor(this.pal().textPrimary)
             Text(this.levelLabel())
               .fontSize(12)
-              .fontColor($r('app.color.text_secondary'))
+              .fontColor(this.pal().textSecondary)
               .margin({ top: 3 })
           }
           .alignItems(HorizontalAlign.Start)
@@ -268,7 +290,7 @@ export struct SettingsSheet {
           Text(this.percentText())
             .fontSize(15)
             .fontWeight(FontWeight.Medium)
-            .fontColor($r('app.color.accent'))
+            .fontColor(this.pal().accent)
         }
         .width('100%')
         .margin({ top: 22 })
@@ -278,7 +300,7 @@ export struct SettingsSheet {
         Row() {
           Text('A')
             .fontSize(13)
-            .fontColor($r('app.color.text_secondary'))
+            .fontColor(this.pal().textSecondary)
           Slider({
             value: this.fontSize,
             min: TEXT_ZOOM_MIN,
@@ -293,29 +315,21 @@ export struct SettingsSheet {
             .margin({ left: 12, right: 12 })
             .trackThickness(this.SLIDER_TRACK_H)
             .blockSize({ width: this.SLIDER_BLOCK_D, height: this.SLIDER_BLOCK_D })
-            .selectedColor($r('app.color.accent'))
-            .trackColor($r('app.color.slider_track'))
-            .blockColor($r('app.color.slider_thumb'))
+            .selectedColor(this.pal().accent)
+            .trackColor(this.pal().sliderTrack)
+            .blockColor(this.pal().sliderThumb)
             .accessibilityText($r('app.string.a11y_font_size'))
             .onChange((value: number, mode: SliderChangeMode) => {
               // 拖动中只更新预览值（面板与网页同时变）；松开 / 点轨道时才落盘
               this.fontSize = normalizeTextZoom(value);
-              if (mode === SliderChangeMode.Begin || mode === SliderChangeMode.Moving) {
-                if (!this.fontDragging) {
-                  // 进入拖动前冻结卡片高度：拖动中字号在变、卡片会被文字撑高，
-                  // 不冻结就会把下面的调节条一路往下顶。
-                  this.frozenCardH = this.cardH();
-                }
-                this.fontDragging = true;
-              }
+              // 拖动过程中只用内存值实时生效；松手 / 点轨道时才落盘（一次写 preferences）
               if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
-                this.fontDragging = false;
                 this.onCommitFontSize(this.fontSize);
               }
             })
           Text('A')
             .fontSize(21)
-            .fontColor($r('app.color.text_secondary'))
+            .fontColor(this.pal().textSecondary)
         }
         .width('100%')
         .margin({ top: 6 })
@@ -326,7 +340,7 @@ export struct SettingsSheet {
           Blank()
           Text($r('app.string.settings_font_size_reset'))
             .fontSize(13)
-            .fontColor($r('app.color.accent'))
+            .fontColor(this.pal().accent)
             .padding({ left: 12, top: 8, bottom: 8 })
             .onClick(() => {
               this.onResetFontSize();
@@ -362,7 +376,7 @@ export struct SettingsSheet {
         Text($r('app.string.settings_title'))
           .fontSize(20)
           .fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.text_primary'))
+          .fontColor(this.pal().textPrimary)
           .layoutWeight(1)
         // 关闭：官方符号 xmark，外面套一个圆形浅底并加阴影，
         // 与系统半模态自带的关闭按钮观感一致（系统那颗也是「圆形浅底 + 叉」）。
@@ -370,18 +384,18 @@ export struct SettingsSheet {
         Row() {
           SymbolGlyph($r('sys.symbol.xmark'))
             .fontSize(16)
-            .fontColor([$r('app.color.text_secondary')])
+            .fontColor([this.pal().textSecondary])
         }
         // 40×40：在 56 高的标题栏内尽量贴近无障碍最小触摸目标
         .width(40)
         .height(40)
         .borderRadius(20)
-        .backgroundColor($r('app.color.surface_tile'))
+        .backgroundColor(this.pal().tile)
         .justifyContent(FlexAlign.Center)
         .alignItems(VerticalAlign.Center)
         .shadow({
           radius: 8,
-          color: $r('app.color.floating_button_shadow'),
+          color: this.pal().shadow,
           offsetX: 0,
           offsetY: 2
         })
@@ -415,7 +429,7 @@ export struct SettingsSheet {
             this.actionRow($r('app.string.settings_reset_fab'), $r('app.string.settings_reset_fab_desc'))
             SymbolGlyph($r('sys.symbol.arrow_counterclockwise'))
               .fontSize(16)
-              .fontColor([$r('app.color.text_secondary')])
+              .fontColor([this.pal().textSecondary])
           }
           .width('100%')
           .padding({ left: 20, right: 20, top: 12, bottom: 12 })
@@ -428,6 +442,13 @@ export struct SettingsSheet {
           Row() {
             this.actionRow($r('app.string.settings_auto_snap'), $r('app.string.settings_auto_snap_desc'))
             Toggle({ type: ToggleType.Switch, isOn: this.autoSnap })
+              // Switch 的默认配色来自系统主题，网页深浅色与系统不一致时会串色
+              // （系统深色 + 网页浅色 = 浅底上一条几乎看不见的白轨道），所以显式整套给色。
+              .switchStyle({
+                unselectedColor: this.pal().switchOff,
+                pointColor: this.pal().sliderThumb
+              })
+              .selectedColor(this.pal().accent)
               .onChange((isOn: boolean) => this.onToggleAutoSnap(isOn))
           }
           .width('100%')
@@ -440,6 +461,11 @@ export struct SettingsSheet {
           Row() {
             this.actionRow($r('app.string.settings_hide_on_snap'), $r('app.string.settings_hide_on_snap_desc'))
             Toggle({ type: ToggleType.Switch, isOn: this.hideOnSnap })
+              .switchStyle({
+                unselectedColor: this.pal().switchOff,
+                pointColor: this.pal().sliderThumb
+              })
+              .selectedColor(this.pal().accent)
               .onChange((isOn: boolean) => this.onToggleHideOnSnap(isOn))
           }
           .width('100%')
@@ -460,10 +486,10 @@ export struct SettingsSheet {
             Text(this.percentText())
               .fontSize(15)
               .fontWeight(FontWeight.Medium)
-              .fontColor($r('app.color.accent'))
+              .fontColor(this.pal().accent)
             SymbolGlyph($r('sys.symbol.chevron_right'))
               .fontSize(14)
-              .fontColor([$r('app.color.text_secondary')])
+              .fontColor([this.pal().textSecondary])
               .margin({ left: 6 })
           }
           .width('100%')
@@ -483,10 +509,10 @@ export struct SettingsSheet {
             Column() {
               Text($r('app.string.settings_clear_cache'))
                 .fontSize(15)
-                .fontColor($r('app.color.text_primary'))
+                .fontColor(this.pal().textPrimary)
               Text($r('app.string.settings_clear_cache_desc'))
                 .fontSize(12)
-                .fontColor($r('app.color.text_secondary'))
+                .fontColor(this.pal().textSecondary)
                 .margin({ top: 3 })
             }
             .alignItems(HorizontalAlign.Start)
@@ -504,10 +530,10 @@ export struct SettingsSheet {
             Column() {
               Text($r('app.string.settings_feedback'))
                 .fontSize(15)
-                .fontColor($r('app.color.text_primary'))
+                .fontColor(this.pal().textPrimary)
               Text($r('app.string.settings_feedback_desc'))
                 .fontSize(12)
-                .fontColor($r('app.color.text_secondary'))
+                .fontColor(this.pal().textSecondary)
                 .margin({ top: 3 })
             }
             .alignItems(HorizontalAlign.Start)
@@ -515,7 +541,7 @@ export struct SettingsSheet {
 
             SymbolGlyph($r('sys.symbol.arrow_right_up_and_square'))
               .fontSize(16)
-              .fontColor([$r('app.color.text_secondary')])
+              .fontColor([this.pal().textSecondary])
           }
           .width('100%')
           .padding({ left: 20, right: 20, top: 16, bottom: 16 })
@@ -535,11 +561,11 @@ export struct SettingsSheet {
     // 必须给确定高度：bindSheet 给内容区的高度有上限（平板横屏约 82% 屏高），
     // 根节点若自适应高度，超出的部分会被面板边缘直接裁掉、不会出现滚动；
     // 撑满后内部的 Scroll 才有可滚动空间（layoutWeight(1) 拿到剩余高度）。
-    // 列表页撑满（需要内部滚动）；字号页＝固定部分 + 预览卡实测高度，正好包住内容，
-    // 底部不会留下大片空白；拖动中用冻结值，滑块位置保持不动。
+    // 列表页撑满（需要内部滚动）；字号页＝固定部分 + 预览卡的**预留高度**（按最大字号算），
+    // 高度恒定 —— 文字不会溢出，调节条也不会被顶走。
     .height(this.fontPage
-      ? this.fontBaseH() + this.effectiveCardH()
+      ? this.fontBaseH() + this.cardH()
       : '100%')
-    .backgroundColor($r('app.color.surface_card'))
+    .backgroundColor(this.pal().card)
   }
 }

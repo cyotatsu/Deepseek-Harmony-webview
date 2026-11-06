@@ -84,7 +84,7 @@ entry/src/main/ets/
 
 ## 版本
 
-`dev.cyotatsu.deepseek.oh` — v1.1.6.2 (1001062)
+`dev.cyotatsu.deepseek.oh` — v1.1.6.3 (1001063)
 
 `versionCode` 编码规则：`主版本×1000000 + 次版本×10000 + 修订×10 + 构建`。
 发版只需改 `AppScope/app.json5` 的 `versionName` 与 `versionCode`

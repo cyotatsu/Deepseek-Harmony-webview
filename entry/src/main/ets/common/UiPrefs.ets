@@ -31,6 +31,11 @@ const KEY_FAB_AUTO_SNAP: string = 'fab_auto_snap';
  * 用户每次都得重新调一遍。读取时按 FontZoom 的区间夹取，防止旧版本写坏的值。
  */
 const KEY_TEXT_ZOOM: string = 'web_text_zoom';
+/**
+ * 上次退出时网页是深色主题（true）。用途：应用重新加载时**先按上次的状态渲染**
+ * 悬浮球，等探测到真实主题再纠正 —— 否则每次冷启动都会先闪一下浅色。
+ */
+const KEY_WEB_DARK: string = 'web_dark';
 
 function openStore(context: common.Context): preferences.Preferences | null {
   try {
@@ -296,5 +301,40 @@ export function saveTextZoom(context: common.Context, zoom: number): void {
     });
   } catch (err) {
     hilog.warn(DOMAIN, TAG, 'Failed to save text zoom');
+  }
+}
+
+/**
+ * 读取「上次退出时网页是否为深色」。
+ *
+ * 从未保存过时返回 false（默认浅色）——这是需求里的默认值：新装 / 清数据后
+ * 悬浮球先按浅色渲染。
+ */
+export function loadWebDark(context: common.Context): boolean {
+  const store: preferences.Preferences | null = openStore(context);
+  if (!store) {
+    return false;
+  }
+  try {
+    return store.getSync(KEY_WEB_DARK, false) as boolean;
+  } catch (err) {
+    hilog.warn(DOMAIN, TAG, 'Failed to load web dark flag');
+    return false;
+  }
+}
+
+/** 保存「网页当前是否为深色」，供下次启动先按它渲染 */
+export function saveWebDark(context: common.Context, dark: boolean): void {
+  const store: preferences.Preferences | null = openStore(context);
+  if (!store) {
+    return;
+  }
+  try {
+    store.putSync(KEY_WEB_DARK, dark);
+    store.flush().catch(() => {
+      hilog.warn(DOMAIN, TAG, 'Failed to flush web dark flag');
+    });
+  } catch (err) {
+    hilog.warn(DOMAIN, TAG, 'Failed to save web dark flag');
   }
 }

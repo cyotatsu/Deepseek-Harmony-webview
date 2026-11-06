@@ -1,3 +1,5 @@
+import { UiPalette, uiPalette } from '../common/UiPalette';
+
 /**
  * 加载失败 / 网络异常错误页。
  *
@@ -7,7 +9,19 @@
 @Component
 export struct ErrorView {
   @Prop isNetworkError: boolean = false;
+  /**
+   * 网页当前是否深色。
+   *
+   * 错误页盖在网页之上，整页底色必须与网页一致，否则站点为深色、系统为浅色时
+   * 会先闪一版白底再变黑（或反过来）。配色走 `UiPalette`，与设置面板同源。
+   */
+  @Prop webDark: boolean = false;
+
   onRetry: () => void = () => {};
+
+  private pal(): UiPalette {
+    return uiPalette(this.webDark);
+  }
 
   build() {
     Column() {
@@ -16,25 +30,25 @@ export struct ErrorView {
         ? $r('sys.symbol.wifi_slash')
         : $r('sys.symbol.exclamationmark_circle'))
         .fontSize(48)
-        .fontColor([$r('app.color.text_secondary')])
+        .fontColor([this.pal().textSecondary])
         .margin({ top: 80, bottom: 16 })
       Text(this.isNetworkError ? $r('app.string.error_network_title') : $r('app.string.error_load_title'))
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.text_primary'))
+        .fontColor(this.pal().textPrimary)
         .margin({ bottom: 8 })
       Text(this.isNetworkError ? $r('app.string.error_network_desc') : $r('app.string.error_load_desc'))
         .fontSize(14)
-        .fontColor($r('app.color.text_secondary'))
+        .fontColor(this.pal().textSecondary)
         .margin({ bottom: 24 })
       Button($r('app.string.retry_button'))
         .type(ButtonType.Normal)
         .fontSize(16).width(160).height(40).borderRadius(20)
-        .backgroundColor($r('app.color.accent')).fontColor($r('app.color.text_on_accent'))
+        .backgroundColor(this.pal().accent).fontColor(this.pal().textOnAccent)
         .onClick(() => this.onRetry())
     }
     .width('100%').height('100%')
     .justifyContent(FlexAlign.Center)
-    .backgroundColor($r('app.color.web_background'))
+    .backgroundColor(this.pal().page)
   }
 }
