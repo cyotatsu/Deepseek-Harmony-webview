@@ -287,6 +287,14 @@
     {
       "name": "toast_font_size_reset",
       "value": "已恢復預設字級"
+    },
+    {
+      "name": "settings_display_fix",
+      "value": "顯示優化"
+    },
+    {
+      "name": "settings_display_fix_desc",
+      "value": "修復公式漏渲染、表格錯列；關閉後按網頁原樣顯示"
     }
   ]
 }

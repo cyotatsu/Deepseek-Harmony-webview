@@ -287,6 +287,14 @@
     {
       "name": "toast_font_size_reset",
       "value": "Размер шрифта по умолчанию восстановлен"
+    },
+    {
+      "name": "settings_display_fix",
+      "value": "Исправление отображения"
+    },
+    {
+      "name": "settings_display_fix_desc",
+      "value": "Чинит неотрисованные формулы и сломанные столбцы; выкл. — как есть"
     }
   ]
 }

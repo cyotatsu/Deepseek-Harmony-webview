@@ -1532,46 +1532,6 @@ export function buildComposerAutoHideScript(): string {
   })();`;
 }
 
-/**
- * 监听「切换到另一个会话」，用于让应用侧重新加载页面、同步服务端最新内容。
- *
- * 背景：站点是 SPA。切会话走的是前端路由，用的是**内存里缓存的会话数据**，
- * 不会重新向服务端拉取 —— 所以在网页端 / 其它设备刚发过消息时，切进来看到的还是旧的。
- * 应用侧没有它的数据接口，唯一能保证拿到最新内容的手段就是让页面**重新加载**一次。
- *
- * 路由变化不像整页加载那样会触发 onPageEnd，因此这里在页面内自己盯：
- * 劫持 pushState / replaceState、监听 popstate，另加 800ms 兜底轮询
- * （有些跳转不经过 history API）；只有「会话路由」变化才上报，避免站内其它跳转误触发。
- */
-export function buildConversationWatchScript(): string {
-  return `(function () {
-    try {
-      if (window.__dsConvWatch) { return 'already'; }
-      window.__dsConvWatch = true;
-      function convKey() {
-        var p = String(location.pathname || '');
-        return /^\\/a\\/chat/.test(p) ? p : '';
-      }
-      window.__dsConvKey = convKey();
-      function report() {
-        var k = convKey();
-        if (k && k !== window.__dsConvKey) {
-          window.__dsConvKey = k;
-          try { console.info('__dsConvChanged:' + k); } catch (e0) { }
-        }
-      }
-      var ps = history.pushState;
-      var rs = history.replaceState;
-      history.pushState = function () { var r = ps.apply(this, arguments); setTimeout(report, 0); return r; };
-      history.replaceState = function () { var r = rs.apply(this, arguments); setTimeout(report, 0); return r; };
-      window.addEventListener('popstate', function () { setTimeout(report, 0); });
-      setInterval(report, 800);
-      return 'installed';
-    } catch (e) {
-      return 'watch-error';
-    }
-  })();`;
-}
 
 /**
  * 通知网页「容器尺寸变了」。
@@ -1962,82 +1922,6 @@ export function buildOverlayCloseScript(kind: string): string {
   })();`;
 }
 
-/**
- * 取出当前**预览态**里那张图的数据，返回 `dataURL|建议文件名`（无预览则返回空串）。
- *
- * 为什么在网页侧取：预览图可能就是用户刚发的本地图、或是带鉴权的远端图。
- * 在页面上下文里用 fetch 拉取可以自动带上 Cookie 与鉴权头，ArkTS 侧直接下载会 401；
- * 同时也能省掉"再猜一次 URL"的逻辑 —— 探测与取图用的是同一套定位规则。
- *
- * 返回格式：`data:image/png;base64,xxxx|<文件名>`；失败返回 `error:<原因>`。
- */
-export function buildPreviewImageScript(): string {
-  return `(async function () {
-    try {
-      function visible(el, minW, minH) {
-        var cs = window.getComputedStyle(el);
-        if (!cs) { return false; }
-        if (cs.display === 'none' || cs.visibility === 'hidden') { return false; }
-        if (cs.opacity !== '' && Number(cs.opacity) === 0) { return false; }
-        var r = el.getBoundingClientRect();
-        return r.width >= minW && r.height >= minH;
-      }
-      function modalAncestorOf(el, maxUp) {
-        var up = el, k = 0;
-        while (up && k < maxUp) {
-          var st = window.getComputedStyle(up);
-          if (st && (st.position === 'fixed' || st.position === 'absolute')) {
-            var z = parseInt(st.zIndex, 10);
-            if (!isNaN(z) && z >= 10) { return up; }
-          }
-          up = up.parentElement; k++;
-        }
-        return null;
-      }
-      // 用与探测**完全相同**的规则定位预览大图，避免"探测说是预览、取图却取到别的图"
-      var imgs = document.querySelectorAll('img');
-      var target = null, i;
-      for (i = 0; i < imgs.length; i++) {
-        var im = imgs[i];
-        if (!visible(im, 160, 160)) { continue; }
-        var ir = im.getBoundingClientRect();
-        var big = Math.min(ir.width, ir.height) >= window.innerHeight * 0.3 ||
-          (ir.width * ir.height) >= (window.innerWidth * window.innerHeight) * 0.35;
-        if (!big) { continue; }
-        if (!modalAncestorOf(im, 10)) { continue; }
-        target = im; break;
-      }
-      if (!target) { return 'error:no-preview-image'; }
-      var src = target.currentSrc || target.src || '';
-      if (!src) { return 'error:no-src'; }
-      var resp = await fetch(src, { credentials: 'include' });
-      if (!resp.ok) { return 'error:http-' + resp.status; }
-      var blob = await resp.blob();
-      var dataUrl = await new Promise(function (res, rej) {
-        var fr = new FileReader();
-        fr.onload = function () { res(fr.result); };
-        fr.onerror = function () { rej(new Error('read-fail')); };
-        fr.readAsDataURL(blob);
-      });
-      // 文件名：优先用 URL 里最后一段，否则按 MIME 给个默认名
-      var name = 'image';
-      try {
-        var m = String(src).split('?')[0].split('#')[0].split('/');
-        var last = decodeURIComponent(m[m.length - 1] || '');
-        if (last && last.indexOf('.') > 0) { name = last; }
-      } catch (e2) { }
-      var mime = (blob && blob.type) || 'image/png';
-      if (name.indexOf('.') < 0) {
-        name = name + '.' + (mime.indexOf('jpeg') >= 0 ? 'jpg' :
-          (mime.indexOf('webp') >= 0 ? 'webp' :
-          (mime.indexOf('gif') >= 0 ? 'gif' : 'png')));
-      }
-      return String(dataUrl) + '|' + name;
-    } catch (e) {
-      return 'error:' + (e && e.message ? e.message : 'unknown');
-    }
-  })();`;
-}
 
 export function buildOverlayDismissScript(): string {
   return `(function () {
@@ -2569,3 +2453,1449 @@ export function buildProbeScript(): string {
     }
   })();`;
 }
+
+export function buildMathRepairScript(): string {
+  return `(function () {
+    try {
+      var kx = window.katex;
+      // 脚本版本标记：改逻辑就换一个，便于在日志里确认设备上跑的是哪一版
+      var VER = 'mathfix=v3';
+      if (!kx || typeof kx.renderToString !== 'function') { return VER + ' no-katex'; }
+      // 最小自检：KaTeX 能用、且真能产出 katex 结构（注入成功但被站点脚本破坏时能看出来）
+      var selfTest = 'bad';
+      try {
+        var st = kx.renderToString('x^2', { throwOnError: true, strict: 'ignore' });
+        selfTest = (st && st.indexOf('katex') >= 0) ? 'ok' : 'bad';
+      } catch (e0) { selfTest = 'bad'; }
+      window.__dsMathFixVer = VER;
+      var BS = String.fromCharCode(92);
+      var NL = String.fromCharCode(10);
+      var CR = String.fromCharCode(13);
+      var TAB = String.fromCharCode(9);
+      var CMD = new RegExp(BS + BS + '[a-zA-Z]{2,}');
+      var MARK = 'ds-math-fix';
+      // 渲染失败的文本节点按节点对象记账：同一节点只试一次，避免每轮重试同一批而饿死后面的公式。
+      if (!window.__dsMathFixFailed) { window.__dsMathFixFailed = new WeakSet(); }
+      var FAILED = window.__dsMathFixFailed;
+      function trim(s) {
+        var a = 0;
+        var b = s.length;
+        while (a < b) {
+          var c = s.charCodeAt(a);
+          if (c === 32 || c === 10 || c === 13 || c === 9) { a++; } else { break; }
+        }
+        while (b > a) {
+          var d = s.charCodeAt(b - 1);
+          if (d === 32 || d === 10 || d === 13 || d === 9) { b--; } else { break; }
+        }
+        return s.substring(a, b);
+      }
+      function flatten(s) {
+        var o = '';
+        for (var i = 0; i < s.length; i++) {
+          var c = s.charAt(i);
+          o += (c === NL || c === CR || c === TAB) ? ' ' : c;
+        }
+        return o;
+      }
+      // —— 模型写歪的公式救回来：逐层加激进，渲染成功即停（只在渲染层生效，不改原文）
+      function isLetterCh(ch) {
+        var cc = ch.charCodeAt(0);
+        return (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122);
+      }
+      // 只认完整命令：后一个字符不能是字母（否则 left 会命中 leftarrow）
+      function findWordAt(s2, needle, from) {
+        var at = s2.indexOf(needle, from || 0);
+        while (at >= 0) {
+          var after = (at + needle.length < s2.length) ? s2.charAt(at + needle.length) : '';
+          if (after === '' || !isLetterCh(after)) { return at; }
+          at = s2.indexOf(needle, at + 1);
+        }
+        return -1;
+      }
+      function countWordAt(s2, needle) {
+        var n = 0;
+        var at = 0;
+        while (true) { at = findWordAt(s2, needle, at); if (at < 0) { return n; } n++; at += needle.length; }
+      }
+      function removeWordAt(s2, needle) {
+        var out = s2;
+        while (true) {
+          var at = findWordAt(out, needle, 0);
+          if (at < 0) { return out; }
+          out = out.substring(0, at) + out.substring(at + needle.length);
+        }
+      }
+      function closeBraceOf(s2, openAt) {
+        var depth = 0;
+        for (var i = openAt; i < s2.length; i++) {
+          var c = s2.charAt(i);
+          if (c === BS) { i++; continue; }
+          if (c === '{') { depth++; } else if (c === '}') { depth--; if (depth === 0) { return i; } }
+        }
+        return -1;
+      }
+      function removeCmdArg(s2, name) {
+        var out = s2;
+        var at = 0;
+        var key = BS + name;
+        while (true) {
+          var p2 = out.indexOf(key, at);
+          if (p2 < 0) { return out; }
+          var open = out.indexOf('{', p2 + key.length);
+          if (open !== p2 + key.length) { at = p2 + key.length; continue; }
+          var close = closeBraceOf(out, open);
+          if (close < 0) { return out; }
+          out = out.substring(0, p2) + out.substring(close + 1);
+          at = p2;
+        }
+      }
+      // 包裹的定界符：$$..$$ / $..$ / [ ] / ( )
+      function stripDelims(s2) {
+        var t = trim(s2);
+        if (t.length > 4 && t.substring(0, 2) === '$$' && t.substring(t.length - 2) === '$$') { return trim(t.substring(2, t.length - 2)); }
+        if (t.length > 4 && t.substring(0, 2) === BS + '[' && t.substring(t.length - 2) === BS + ']') { return trim(t.substring(2, t.length - 2)); }
+        if (t.length > 4 && t.substring(0, 2) === BS + '(' && t.substring(t.length - 2) === BS + ')') { return trim(t.substring(2, t.length - 2)); }
+        if (t.length > 2 && t.charAt(0) === '$' && t.charAt(t.length - 1) === '$') { return trim(t.substring(1, t.length - 1)); }
+        return s2;
+      }
+      // tag / label / notag nonumber hfill noindent displaystyle：对渲染无用或容易报错
+      function stripMeta(s2) {
+        var out = s2;
+        out = removeCmdArg(out, 'tag');
+        out = removeCmdArg(out, 'label');
+        out = removeWordAt(out, BS + 'notag');
+        out = removeWordAt(out, BS + 'nonumber');
+        out = removeWordAt(out, BS + 'hfill');
+        out = removeWordAt(out, BS + 'noindent');
+        out = removeWordAt(out, BS + 'displaystyle');
+        return trim(out);
+      }
+      // left / right 数量不匹配时（模型常写漏一边）全去掉，定界符保留
+      function balanceLeftRight(s2) {
+        var l = countWordAt(s2, BS + 'left');
+        var r = countWordAt(s2, BS + 'right');
+        if (l === r) { return s2; }
+        var out = removeWordAt(s2, BS + 'left');
+        return removeWordAt(out, BS + 'right');
+      }
+      // begin{aligned} 写了开头忘了 end：补上
+      function closeEnvs(s2) {
+        var stack = [];
+        var at = 0;
+        while (true) {
+          var b = s2.indexOf(BS + 'begin{', at);
+          var e = s2.indexOf(BS + 'end{', at);
+          var next = -1;
+          var isBegin = false;
+          if (b >= 0 && (e < 0 || b < e)) { next = b; isBegin = true; } else if (e >= 0) { next = e; }
+          if (next < 0) { break; }
+          var open = s2.indexOf('{', next);
+          var close = (open >= 0) ? closeBraceOf(s2, open) : -1;
+          if (close < 0) { break; }
+          var env = s2.substring(open + 1, close);
+          if (isBegin) { stack.push(env); } else if (stack.length > 0) { stack.pop(); }
+          at = close + 1;
+        }
+        // 只补「恰好一个环境没闭合」的情况：多个同时缺 end 时缺口位置不唯一，
+        // 猜出来的结构可能合法但含义不同，宁可让 KaTeX 报错走优雅跳过。
+        if (stack.length !== 1) { return s2; }
+        var out = s2;
+        for (var i = stack.length - 1; i >= 0; i--) { out += BS + 'end{' + stack[i] + '}'; }
+        return out;
+      }
+      function balanceBraces(s2) {
+        var d = 0;
+        var min = 0;
+        var i = 0;
+        while (i < s2.length) {
+          var c = s2.charAt(i);
+          if (c === BS) { i += 2; continue; }
+          if (c === '{') { d++; } else if (c === '}') { d--; if (d < min) { min = d; } }
+          i++;
+        }
+        // 只在「缺的是结尾的右括号」时补；中间多出过右括号说明缺口位置不唯一，
+        // 补出来的可能是另一条合法但含义不同的公式 → 不猜，交给优雅跳过。
+        if (min < 0) { return s2; }
+        var out = s2;
+        while (d > 0) { out += '}'; d--; }
+        return out;
+      }
+      // ce{} 是 mhchem，KaTeX 没带；降级成 mathrm{} 并把箭头换成标准符号
+      function convertCe(s2) {
+        var out = s2;
+        var at = 0;
+        var key = BS + 'ce';
+        while (true) {
+          var p2 = out.indexOf(key, at);
+          if (p2 < 0) { return out; }
+          var open = p2 + key.length;
+          if (out.charAt(open) !== '{') { at = open; continue; }
+          var close = closeBraceOf(out, open);
+          if (close < 0) { return out; }
+          var inner = out.substring(open + 1, close);
+          // 复杂化学式（电荷 ^2-、下标 _、嵌套花括号）转成 mathrm 会丢语义，
+          // 宁可让它渲染失败走优雅跳过，也不出一张看起来对、实际变味的式子。
+          if (inner.indexOf('^') >= 0 || inner.indexOf('_') >= 0 || inner.indexOf('{') >= 0) {
+            at = close + 1;
+            continue;
+          }
+          inner = inner.split('<->').join(BS + 'leftrightarrow ');
+          inner = inner.split('->').join(BS + 'rightarrow ');
+          inner = inner.split('=>').join(BS + 'Rightarrow ');
+          inner = inner.split('<-').join(BS + 'leftarrow ');
+          var rep = (inner.indexOf(BS) < 0) ? (BS + 'mathrm{' + inner + '}') : inner;
+          out = out.substring(0, p2) + rep + out.substring(close + 1);
+          at = p2 + rep.length;
+        }
+      }
+      // 没有 begin{} 时裸 & 是非法字符
+      function escapeAmp(s2) {
+        if (s2.indexOf(BS + 'begin{') >= 0) { return s2; }
+        if (s2.indexOf('&') < 0) { return s2; }
+        var out = '';
+        for (var i = 0; i < s2.length; i++) {
+          var c = s2.charAt(i);
+          if (c === BS) { out += s2.substring(i, i + 2); i++; continue; }
+          out += (c === '&') ? (BS + '&') : c;
+        }
+        return out;
+      }
+      // 去掉某个命令词本身（保留它后面的定界符），用于 middle 这类只能出现在
+      // left/right 内部的命令：单独出现时 KaTeX 会报错，去掉后竖线依然合法。
+      function removeWordAll(s2, name) {
+        var out = s2;
+        var needle = BS + name;
+        var guard = 0;
+        while (guard < 6) {
+          guard++;
+          var at = out.indexOf(needle);
+          if (at < 0) { break; }
+          var after = out.charAt(at + needle.length);
+          if (isLetterCh(after)) { break; }
+          out = out.substring(0, at) + out.substring(at + needle.length);
+        }
+        return out;
+      }
+      var KNOWN_ENVS = ['aligned', 'align', 'align*', 'array', 'matrix', 'pmatrix',
+        'bmatrix', 'Bmatrix', 'vmatrix', 'Vmatrix', 'cases', 'dcases', 'split',
+        'gathered', 'gather', 'gather*', 'equation', 'equation*', 'subarray',
+        'smallmatrix', 'CD'];
+      function envIsKnown(name) {
+        for (var i = 0; i < KNOWN_ENVS.length; i++) {
+          if (KNOWN_ENVS[i] === name) { return true; }
+        }
+        return false;
+      }
+      // 站点/模型偶尔写出 KaTeX 不认识的块环境（渲染器扩展、自定义环境），
+      // 这时把 begin/end 外壳剥掉、把内容留下来当普通公式渲染。
+      function unwrapUnknownEnv(s2) {
+        var bTok = BS + 'begin{';
+        var at = s2.indexOf(bTok);
+        if (at < 0) { return s2; }
+        var nameEnd = s2.indexOf('}', at + bTok.length);
+        if (nameEnd < 0) { return s2; }
+        var name = trim(s2.substring(at + bTok.length, nameEnd));
+        if (name.length === 0 || envIsKnown(name)) { return s2; }
+        // 图表/绘图类环境剥壳只会把结构误显示成公式，直接放弃。
+        var NOT_MATH_ENVS = ['mermaid', 'graphviz', 'dot', 'tikz', 'circuitikz', 'plantuml', 'svg'];
+        for (var bi = 0; bi < NOT_MATH_ENVS.length; bi++) {
+          if (name === NOT_MATH_ENVS[bi]) { return s2; }
+        }
+        if (s2.indexOf('&') >= 0) { return s2; }
+        var out = s2.substring(0, at) + s2.substring(nameEnd + 1);
+        var eTok = BS + 'end{' + name + '}';
+        var eAt = out.indexOf(eTok);
+        if (eAt >= 0) { out = out.substring(0, eAt) + out.substring(eAt + eTok.length); }
+        return out;
+      }
+      function candidates(tex) {
+        var list = [];
+        var add = function (t) { if (t && t.length > 0 && list.indexOf(t) < 0) { list.push(t); } };
+        add(tex);
+        var s2 = stripDelims(tex);
+        add(s2);
+        s2 = stripMeta(s2);
+        add(s2);
+        s2 = removeWordAll(s2, 'middle');
+        add(s2);
+        s2 = unwrapUnknownEnv(s2);
+        add(s2);
+        s2 = balanceLeftRight(s2);
+        add(s2);
+        s2 = closeEnvs(s2);
+        add(s2);
+        s2 = balanceBraces(s2);
+        add(s2);
+        s2 = convertCe(s2);
+        add(s2);
+        s2 = escapeAmp(s2);
+        add(s2);
+        s2 = trim(flatten(s2));
+        add(s2);
+        return list;
+      }
+      function blocked(node) {
+        var n = node;
+        var d = 0;
+        while (n && d < 14) {
+          var tn = n.nodeName ? String(n.nodeName).toLowerCase() : '';
+          if (tn === 'math' || tn === 'pre' || tn === 'code' || tn === 'textarea' ||
+              tn === 'input' || tn === 'script' || tn === 'style') { return true; }
+          if (n.classList && (n.classList.contains('katex') || n.classList.contains(MARK))) { return true; }
+          if (n.getAttribute && n.getAttribute('contenteditable')) { return true; }
+          n = n.parentNode;
+          d++;
+        }
+        return false;
+      }
+      var STRAY = [']', BS + ']', '$$', '$'];
+      function stripStray(tex) {
+        var s = tex;
+        var changed = true;
+        while (changed) {
+          changed = false;
+          for (var i = 0; i < STRAY.length; i++) {
+            var tail = STRAY[i];
+            if (s.length >= tail.length + 1 && s.substring(s.length - tail.length) === tail) {
+              s = trim(s.substring(0, s.length - tail.length));
+              changed = true;
+            }
+          }
+        }
+        return s;
+      }
+      var CJK = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/;
+      // 纯 ASCII 的显示公式（例如 D(t) = |PQ|^2 = (x_0 + mt - x_1)^2）里没有任何反斜杠命令，
+      // 早先只认反斜杠命令的判据会漏掉它们；这里放宽：含上下标且不含中日韩文字才算数学。
+      // 模型/站点兜底留下的定界符（$..$、$$..$$、[ ]、( ）本身就是数学的强信号
+      function wrappedMath(v) {
+        var t = trim(v);
+        if (t.length > 4 && t.substring(0, 2) === '$$' && t.substring(t.length - 2) === '$$') { return true; }
+        if (t.length > 4 && t.substring(0, 2) === BS + '[' && t.substring(t.length - 2) === BS + ']') { return true; }
+        if (t.length > 4 && t.substring(0, 2) === BS + '(' && t.substring(t.length - 2) === BS + ')') { return true; }
+        if (t.length > 2 && t.charAt(0) === '$' && t.charAt(t.length - 1) === '$') { return true; }
+        return false;
+      }
+      // 直接写出的 Unicode 数学符号（∑ ∫ √ ≤ ∈ ∏ ∂ …）
+      var UMS = '\u2211\u222b\u220f\u221a\u2264\u2265\u2260\u2248\u221e\u2202\u2207\u00b1\u00d7\u00f7\u2208\u2209\u2282\u2283\u222a\u2229\u2192\u21d2\u21d4\u2200\u2203\u2218\u2026\u00b7';
+      function hasUniMath(v) {
+        for (var i = 0; i < v.length; i++) { if (UMS.indexOf(v.charAt(i)) >= 0) { return true; } }
+        return false;
+      }
+      // 纯 ASCII 方程（N(d)M'(d) - N'(d)M(d) = 0）：没有反斜杠命令、也没有上下标，
+      // 但整段只由数学字符组成且含等号 + 括号/撇号时，才认为它是公式。
+      var APOS = String.fromCharCode(39);
+      // 去掉 {} ; # " < > | 这些偏代码/配置的字符，避免把正文里的 cfg 片段当公式。
+      var ASCII_OK = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 +-*/=()[],.^_' + APOS;
+      // 连续 4 个以上拉丁字母基本就是单词（timeout / config / equals），
+      // 公式里的变量是单字母或缩写，靠这条把「正常英文/配置里的 ASCII 等式」挡在外面。
+      function hasWordRun(v, n) {
+        var run = 0;
+        for (var i = 0; i < v.length; i++) {
+          var c = v.charCodeAt(i);
+          var isL = (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+          run = isL ? (run + 1) : 0;
+          if (run >= n) { return true; }
+        }
+        return false;
+      }
+      function asciiEquation(v) {
+        if (v.length < 6 || v.length > 200) { return false; }
+        if (v.indexOf('=') < 0) { return false; }
+        if (v.indexOf('(') < 0 && v.indexOf(APOS) < 0) { return false; }
+        if (hasWordRun(v, 4)) { return false; }
+        for (var i = 0; i < v.length; i++) { if (ASCII_OK.indexOf(v.charAt(i)) < 0) { return false; } }
+        return true;
+      }
+      function looksMath(v) {
+        if (CMD.test(v)) { return true; }
+        if (wrappedMath(v)) { return true; }
+        if (CJK.test(v)) { return false; }
+        if (hasUniMath(v)) { return true; }
+        if (v.indexOf('^') >= 0 || v.indexOf('_') >= 0) { return /[=+\-]/.test(v); }
+        return asciiEquation(v);
+      }
+      function render(tex, display) {
+        var list = candidates(tex);
+        for (var ci = 0; ci < list.length; ci++) {
+          try {
+            var html = kx.renderToString(list[ci], { displayMode: display, throwOnError: true, strict: 'ignore' });
+            if (html) { return html; }
+          } catch (e1) { }
+        }
+        return '';
+      }
+      function isStrayOnly(t) {
+        if (t.length === 0 || t.length > 2) { return false; }
+        for (var i = 0; i < STRAY.length; i++) {
+          if (t === STRAY[i]) { return true; }
+        }
+        return false;
+      }
+      // 单独成段的噪音括号：模型常把收尾定界符写在下一段（另一个 p），
+      // 只有紧邻补渲染结果的段落才敢动，正文里的方括号不碰。
+      // 注意要跨过 <br>：站点的段落里公式与括号之间就夹着换行符，不跨过就永远找不到。
+      function sweepSide(anchor, dir) {
+        var cur = (dir < 0) ? anchor.previousSibling : anchor.nextSibling;
+        var guard = 0;
+        while (cur && guard < 8) {
+          guard++;
+          var isEl = (cur.nodeType === 1);
+          if (isEl && String(cur.nodeName) === 'BR') {
+            cur = (dir < 0) ? cur.previousSibling : cur.nextSibling;
+            continue;
+          }
+          if (!isStrayOnly(trim(String(cur.textContent || '')))) { return; }
+          try {
+            if (cur.nodeType === 3) { cur.nodeValue = ''; } else { cur.style.display = 'none'; }
+          } catch (e12) { return; }
+          cur = (dir < 0) ? cur.previousSibling : cur.nextSibling;
+        }
+      }
+      function cleanupStrays(anchor) {
+        if (!anchor || !anchor.parentNode) { return; }
+        sweepSide(anchor, -1);
+        sweepSide(anchor, 1);
+      }
+      // 顺手清掉同一段落里只剩定界符的文本节点（右方括号 / 反斜杠右方括号 / 美元符）。
+      // 模型的错误写法通常长这样：公式一行、下一行单独一个右方括号；渲染器放弃后
+      // 两者都成了普通文字。公式补渲染完，这个孤零零的括号就是纯噪音。
+      // 只清「同一段落内已经有补渲染结果」的段落，避免误删正文里的方括号。
+      function paragraphOf(el) {
+        var n = el;
+        var d = 0;
+        while (n && d < 6) {
+          if (n.nodeName === 'P' || n.nodeName === 'LI') { return n; }
+          n = n.parentNode;
+          d++;
+        }
+        return null;
+      }
+      // 公式被站点降级成纯文本时，编号（tag{1} 的 1、或 (1)）会掉到段落里单独成行，
+      // 公式补渲染之后它就是纯噪音；只在「同段落已经有补渲染结果」时才敢删。
+      function isTagNumber(t) {
+        if (t.length === 0 || t.length > 4) { return false; }
+        var s2 = t;
+        if (s2.length > 2) {
+          var head = s2.charAt(0);
+          var tail = s2.charAt(s2.length - 1);
+          if ((head === '(' || head === '[') && (tail === ')' || tail === ']')) { s2 = s2.substring(1, s2.length - 1); }
+        }
+        if (s2.length === 0 || s2.length > 2) { return false; }
+        for (var i = 0; i < s2.length; i++) {
+          var c = s2.charCodeAt(i);
+          if (c < 48 || c > 57) { return false; }
+        }
+        return true;
+      }
+      function stripInParagraph(par) {
+        if (!par) { return; }
+        // 先拷成静态数组：childNodes 是活的，边删 <br> 边遍历会漏掉后面的节点
+        var kids = [];
+        var rawKids = par.childNodes;
+        for (var kk = 0; kk < rawKids.length; kk++) { kids.push(rawKids[kk]); }
+        for (var k = 0; k < kids.length; k++) {
+          var kid = kids[k];
+          if (!kid) { continue; }
+          var isText = (kid.nodeType === 3);
+          var kv = trim(String(kid.textContent || ''));
+          if (kv.length === 0 || kv.length > 2) { continue; }
+          var isStray = false;
+          for (var si = 0; si < STRAY.length; si++) {
+            if (kv === STRAY[si]) { isStray = true; break; }
+          }
+          if (!isStray) {
+            var hasFix = null;
+            try { hasFix = par.querySelector ? par.querySelector('.' + MARK) : null; } catch (e13) { }
+            if (hasFix && isTagNumber(kv)) { isStray = true; }
+          }
+          if (!isStray) { continue; }
+          // 不要把已经渲染好的公式当噪音
+          if (!isText && kid.querySelector && kid.querySelector('.katex')) { continue; }
+          try {
+            if (isText) { kid.nodeValue = ''; } else { kid.style.display = 'none'; }
+          } catch (e7) { continue; }
+          // 连它旁边的 <br> 一起去掉，否则会留下空行
+          var before = kid.previousSibling;
+          var after = kid.nextSibling;
+          try {
+            if (before && before.nodeName === 'BR' && before.parentNode === par) { par.removeChild(before); }
+            if (after && after.nodeName === 'BR' && after.parentNode === par) { par.removeChild(after); }
+          } catch (e4) { }
+        }
+        cleanupStrays(par);
+      }
+      // 站点是 React 渲染的，我们的改动之后它可能重绘把噪音节点放回来；
+      // 所以每轮 scan 都按已有补渲染结果重新扫一遍段落，代价很低。
+      function sweepStrays() {
+        var fixes = null;
+        try { fixes = document.querySelectorAll('.' + MARK); } catch (e9) { return; }
+        if (!fixes) { return; }
+        for (var f = 0; f < fixes.length; f++) {
+          var host = fixes[f];
+          stripInParagraph(host ? host.parentNode : null);
+        }
+      }
+      // 段落里内联的 $..$ / $$..$$：站点整段放弃渲染时它们会以纯文本留在段落中间，
+      // 这里只替换「明显是公式」的那些片段，其余文字原样保留。
+      function inlineSegments(v) {
+        var parts = [];
+        var i = 0;
+        var last = 0;
+        var found = 0;
+        while (i < v.length) {
+          if (v.charAt(i) !== '$') { i++; continue; }
+          var two = (v.substring(i, i + 2) === '$$');
+          var w = two ? 2 : 1;
+          var open = i + w;
+          var close = -1;
+          var probe = open;
+          while (true) {
+            close = v.indexOf(two ? '$$' : '$', probe);
+            if (close < 0) { break; }
+            var inner = v.substring(open, close);
+            if (inner.length > 0 && inner.length <= 200 && (CMD.test(inner) || looksMath(inner))) { break; }
+            probe = close + w;
+            close = -1;
+          }
+          if (close < 0) { i = open; continue; }
+          if (found >= 4) { break; }
+          if (i > last) { parts.push({ text: v.substring(last, i) }); }
+          parts.push({ tex: stripStray(trim(v.substring(open, close))), display: two });
+          found++;
+          last = close + w;
+          i = last;
+        }
+        if (found === 0) { return null; }
+        if (last < v.length) { parts.push({ text: v.substring(last) }); }
+        return parts;
+      }
+      function inlineFix(node, par) {
+        if (node.nodeType !== 3) { return 0; }
+        var v = String(node.nodeValue || '');
+        if (v.indexOf('$') < 0) { return 0; }
+        var parts = inlineSegments(v);
+        if (!parts) { return 0; }
+        var frag = document.createDocumentFragment();
+        var made = 0;
+        for (var pi = 0; pi < parts.length; pi++) {
+          var part = parts[pi];
+          if (part.text) { frag.appendChild(document.createTextNode(part.text)); continue; }
+          var html2 = render(part.tex, part.display);
+          if (!html2) { frag.appendChild(document.createTextNode(part.tex)); continue; }
+          var holder2 = document.createElement(part.display ? 'div' : 'span');
+          holder2.className = MARK;
+          holder2.innerHTML = html2;
+          frag.appendChild(holder2);
+          made++;
+        }
+        if (made === 0) { return 0; }
+        try { par.replaceChild(frag, node); } catch (e5) { return 0; }
+        return made;
+      }
+      // 行内语境：站点常把一段 Unicode 数学（A ∩ A = A）包在 <span> 里嵌进整句，
+      // 这种「一条短式子夹在正文中间」不该被当成整段公式换成块级排版。
+      // 站点包行内公式的元素名不固定（span / strong / div / 自造标签都出现过），所以不按标签名判断：
+      // 看「段落里除了它还有没有别的文字」——有就是夹在句子中间的短式子，按行内处理。
+      // 只有短（≤20 字）且不含反斜杠命令的才降级；长公式、\frac 之类仍按整段排版。
+      function isInlineContext(node, tex) {
+        var h = node.parentNode;
+        if (!h || h.nodeType !== 1) { return false; }
+        if (!tex || tex.length > 20 || tex.indexOf(BS) >= 0) { return false; }
+        var para = paragraphOf(h);
+        if (!para || para === h) { return false; }
+        try {
+          var whole = trim(String(para.textContent || ''));
+          var own = trim(String(h.textContent || ''));
+          return (whole.length - own.length) > 0;
+        } catch (e8) { return false; }
+      }
+      function fix(nodes) {
+        var done = 0;
+        for (var i = 0; i < nodes.length; i++) {
+          var node = nodes[i];
+          var par = node.parentNode;
+          if (!par) { continue; }
+          var tex = stripStray(trim(String(node.nodeValue || '')));
+          if (tex.length < 2) { continue; }
+          var display = false;
+          try {
+            var parTxt = trim(String(par.textContent || ''));
+            display = parTxt === tex || trim(stripStray(parTxt)) === tex;
+          } catch (e0) { display = false; }
+          // 段落里其余文字不为空 → 这是句子里的行内公式，保持行内，别换成块级排版。
+          if (display && isInlineContext(node, tex)) { display = false; }
+          var isCmd = CMD.test(tex);
+          // 没有反斜杠命令的（纯 ASCII / 纯 Unicode 符号）公式只在「整段就是这条公式」时
+          // 才敢整段替换，否则可能把一段普通文字换成公式排版。
+          if ((isCmd || looksMath(tex)) && (isCmd || display)) {
+            var html = render(tex, display);
+            if (!html) { FAILED.add(node); continue; }
+            var holder = document.createElement(display ? 'div' : 'span');
+            holder.className = MARK;
+            holder.innerHTML = html;
+            try { par.replaceChild(holder, node); } catch (e3) { continue; }
+            stripInParagraph(par);
+            if (display) {
+              var para = paragraphOf(par);
+              if (para && para !== par) { stripInParagraph(para); }
+            }
+            done++;
+            continue;
+          }
+          done += inlineFix(node, par);
+        }
+        return done;
+      }
+      function scan() {
+        if (!document.body) { return 0; }
+        var walker = null;
+        try { walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null); } catch (e4) {
+          return 0;
+        }
+        var nodes = [];
+        var t = null;
+        while ((t = walker.nextNode())) {
+          var v = String(t.nodeValue || '');
+          if (!looksMath(v)) { continue; }
+          if (blocked(t.parentNode)) { continue; }
+          if (FAILED.has(t)) { continue; }
+          nodes.push(t);
+          if (nodes.length >= 20) { break; }
+        }
+        if (!nodes.length) { sweepStrays(); return 0; }
+        var n = fix(nodes);
+        window.__dsMathFixCount = (window.__dsMathFixCount || 0) + n;
+        sweepStrays();
+        // 本轮被 20 个候选的上限截断 → 还有积压，主动续排一轮（不加定时器，避免空转）。
+        if (nodes.length >= 20) { setTimeout(function () { try { scan(); } catch (e7) { } }, 300); }
+        return n;
+      }
+      var first = scan();
+      if (!window.__dsMathFixObserver && document.body) {
+        try {
+          window.__dsMathFixObserver = new MutationObserver(function () {
+            if (window.__dsMathFixTimer) { return; }
+            window.__dsMathFixTimer = setTimeout(function () {
+              window.__dsMathFixTimer = 0;
+              try { scan(); } catch (e5) { }
+            }, 900);
+          });
+          window.__dsMathFixObserver.observe(document.body,
+            { childList: true, subtree: true, characterData: true });
+        } catch (e6) { }
+      }
+      // 每个文档一条：注入成功即带 installed，便于在设备日志里确认脚本版本与自检；
+      // 真修了内容才追加修复数，避免 fixed=0 时信息被稳态过滤掉。
+      return VER + ' self=' + selfTest + ' installed' + ((first > 0) ? (' fixed=' + first) : '');
+    } catch (e) {
+      return 'err ' + e;
+    }
+  })();`;
+}
+
+export function buildScrollFixScript(): string {
+  return `(function() {
+  var id = 'ds-scroll-fix';
+  if (document.getElementById(id)) {
+    return 'ok';
+  }
+  var st = document.createElement('style');
+  st.id = id;
+  st.textContent = 'pre,table,.katex-display{-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}'
+    // overflow-y 必须显式 hidden：只写 overflow-x:auto 时另一轴的 visible 会按规范算成 auto，
+    // 于是本来完整显示的公式也能上下滚几像素、右侧还冒出一条滚动条（实机现象）。
+    + 'pre,.katex-display{overflow-x:auto;overflow-y:hidden}'
+    // 表格样式只作用于 table.ds-tbl-fixed —— 也就是「确实显示异常」被 JS 打过标记的表
+    //（超宽溢出或单元格内容溢出）。正常的表完全保持站点原样，不改列宽、不改行线、不改间距。
+    + 'table.ds-tbl-fixed{border-collapse:collapse;font-variant-numeric:tabular-nums;table-layout:auto !important;width:auto !important;max-width:none !important}'
+    + 'table.ds-tbl-fixed th,table.ds-tbl-fixed td{padding:8px 10px;vertical-align:top;line-height:1.65;text-align:left;white-space:normal;overflow-wrap:anywhere}'
+    + 'table.ds-tbl-fixed th{font-weight:600}'
+    + 'table.ds-tbl-fixed tr{border-bottom:1px solid rgba(127,127,127,0.35)}'
+    + 'table.ds-tbl-fixed thead tr,table.ds-tbl-fixed tr:first-child{border-top:1px solid rgba(127,127,127,0.35)}'
+    + 'table.ds-tbl-fixed th{border-bottom:1px solid rgba(127,127,127,0.55)}'
+    + 'table.ds-tbl-fixed .katex-display{margin:0.2em 0}'
+    // 异常表里的行内公式必须不可断行：white-space:normal 时浏览器会认为它能在任意位置折行，
+    // 于是把列宽算得比公式实际宽度还窄，绘制时公式就压到右边那一列的文字上（实机现象）。
+    + 'table.ds-tbl-fixed td .katex,table.ds-tbl-fixed th .katex{white-space:nowrap !important}';
+  (document.head || document.documentElement).appendChild(st);
+  // 站点自己的表格样式里带了 width/min-width 的 !important，样式表压不过它，
+  // 于是列宽被算窄、行内公式（KaTeX 不可断行）溢到右边那一列、与文字叠在一起。
+  // 用**内联 !important** 才能稳胜：列宽按内容撑开、表格不再被拉伸，超宽交给外层横滑。
+  var PROPS = [
+    ['table-layout', 'auto'],
+    ['width', 'auto'],
+    ['min-width', '0'],
+    ['max-width', 'none']
+  ];
+  // 用户要求：只优化「显示异常」的表格，正常表格必须保持站点原样。
+  // 异常判定：①表格比所在容器还宽（横向溢出）②有关键单元格的内容比单元格宽（公式被裁或压列）。
+  // 已打过标记的表不再判定：修好之后它看起来就「正常」了，若重新判定会放弃后续兜底。
+  var FIX_CLS = 'ds-tbl-fixed';
+  function tableIsBroken(t) {
+    if (t.classList && t.classList.contains(FIX_CLS)) { return true; }
+    var host = t.parentElement;
+    var cw = (host && host.clientWidth) || 0;
+    if (cw > 0 && t.scrollWidth > cw + 2) { return true; }
+    var cs0 = t.querySelectorAll('td,th');
+    for (var ci0 = 0; ci0 < cs0.length; ci0++) {
+      if (cs0[ci0].scrollWidth > cs0[ci0].clientWidth + 2) { return true; }
+    }
+    return false;
+  }
+  function stampTable(t) {
+    if (!tableIsBroken(t)) { return; }
+    if (t.classList) { t.classList.add(FIX_CLS); }
+    for (var pi = 0; pi < PROPS.length; pi++) {
+      t.style.setProperty(PROPS[pi][0], PROPS[pi][1], 'important');
+    }
+    var ks = t.querySelectorAll('.katex');
+    for (var ki = 0; ki < ks.length; ki++) {
+      ks[ki].style.setProperty('white-space', 'nowrap', 'important');
+    }
+    // 列宽兜底：站点 CSS 会把列宽算得比不可断行的行内公式还窄，公式因此压到右边那一列上。
+    // 只能按内容实测宽度写 min-width（window 变化时由 resize 监听重算，见 stampAll 调用处）。
+    var cs2 = t.querySelectorAll('td,th');
+    for (var ci = 0; ci < cs2.length; ci++) {
+      var cell = cs2[ci];
+      if (cell.scrollWidth > cell.clientWidth + 2) {
+        cell.style.setProperty('min-width', cell.scrollWidth + 'px', 'important');
+        // 打标记：只清理本脚本写过的宽度，绝不碰站点自己的内联样式。
+        cell.setAttribute('data-ds-mw', '1');
+      }
+    }
+  }
+  // 上一轮按旧内容/旧窗口算出来的像素宽度必须先清掉再重算，
+  // 否则内容变短或窗口变窄后，列会一直被旧宽度撑着（用户反馈过「窗口一变就不对」）。
+  function clearStamp() {
+    var cc = document.querySelectorAll('[data-ds-mw]');
+    for (var ci0 = 0; ci0 < cc.length; ci0++) {
+      cc[ci0].style.removeProperty('min-width');
+      cc[ci0].removeAttribute('data-ds-mw');
+    }
+  }
+  function stampAll() {
+    clearStamp();
+    var ts = document.querySelectorAll('table');
+    for (var ti = 0; ti < ts.length; ti++) { stampTable(ts[ti]); }
+  }
+  stampAll();
+  // 逐格 min-width 是按当时的像素算出来的：窗口变化 / 分屏 / 旋转之后必须重算一遍，
+  // 否则列宽会停留在旧尺寸（用户反馈过「窗口一变就不对」）。
+  if (!window.__dsTableStampResize) {
+    window.__dsTableStampResize = 1;
+    var rt = 0;
+    window.addEventListener('resize', function () {
+      if (rt) { clearTimeout(rt); }
+      rt = setTimeout(function () {
+        rt = 0;
+        try { window.__dsTableStampAll(); } catch (eR) { }
+      }, 250);
+    });
+  }
+  window.__dsTableStampAll = stampAll;
+  if (!window.__dsTableStampObs) {
+    window.__dsTableStampObs = new MutationObserver(function () {
+      if (window.__dsTableStampQueued) { return; }
+      window.__dsTableStampQueued = true;
+      setTimeout(function () {
+        window.__dsTableStampQueued = false;
+        stampAll();
+      }, 300);
+    });
+    window.__dsTableStampObs.observe(document.body, { childList: true, subtree: true });
+  }
+  return 'ok';
+})();`;
+}
+
+/** document-start 注入：只读嗅探，把模型原始 Markdown 重建后存到 window.__dsMd。 */
+export function buildSniffScript(): string {
+  return `(function(){
+  if (window.__dsSniffInstalled) { return; }
+  window.__dsSniffInstalled = 1;
+  window.__dsXhrMap = {};
+  window.__dsMd = '';
+  window.__dsMdVersion = 0;
+  function rebuild() {
+    var keys = Object.keys(window.__dsXhrMap || {});
+    var best = '';
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i].indexOf('/chat/completion') < 0) { continue; }
+      var v = String(window.__dsXhrMap[keys[i]] || '');
+      if (v.length > best.length) { best = v; }
+    }
+    if (!best) { return; }
+    var md = '';
+    var lines = best.split(String.fromCharCode(10));
+    for (var j = 0; j < lines.length; j++) {
+      var ln = lines[j];
+      if (ln.indexOf('data: ') !== 0) { continue; }
+      var o = null;
+      try { o = JSON.parse(ln.slice(6)); } catch (e0) { continue; }
+      if (o && typeof o.v === 'string' && typeof o.p === 'string' && o.p.indexOf('/content') >= 0) {
+        md = (o.o === 'SET') ? String(o.v) : (md + String(o.v));
+      } else if (o && typeof o.v === 'string' && typeof o.p === 'undefined') {
+        md = md + o.v;
+      } else if (o && o.v && o.v.response && o.v.response.content) {
+        md = String(o.v.response.content);
+      }
+    }
+    try {
+      var k1 = best.indexOf('\"response_message_id\":');
+      if (k1 >= 0) {
+        var s1 = best.substring(k1 + 22, k1 + 44);
+        var num1 = '';
+        for (var q1 = 0; q1 < s1.length; q1++) {
+          var ch1 = s1.charAt(q1);
+          if (ch1 >= '0' && ch1 <= '9') { num1 += ch1; } else if (num1.length > 0) { break; }
+        }
+        if (num1.length > 0) { window.__dsStreamMsgId = num1; }
+      }
+    } catch (eS) { }
+    if (md.length > 0 && md !== window.__dsMd) {
+      window.__dsMd = md;
+      window.__dsMdVersion = (window.__dsMdVersion || 0) + 1;
+      if (window.__dsRepairTables && best.indexOf('FINISHED') >= 0) {
+        setTimeout(function () { try { window.__dsRepairTables(); } catch (e2) { } }, 0);
+      }
+    }
+  }
+  function parseHistory(txt) {
+    var o = null;
+    try { o = JSON.parse(txt); } catch (e) { window.__dsHistDiag = 'badjson'; return; }
+    var bd = o && o.data && o.data.biz_data;
+    var keys = bd ? Object.keys(bd) : [];
+    var m0 = bd && bd.chat_messages;
+    window.__dsHistDiag = 'bk=' + keys.join(',') + ';cm=' + (m0 ? m0.length : -1);
+    if (m0 && m0.length > 0) {
+      var f = m0[0];
+      window.__dsHistDiag += ';fk=' + (f ? Object.keys(f).join(',') : 'null');
+      if (f && typeof f.content === 'string') { window.__dsHistDiag += ';ct=string'; }
+      else if (f && f.content) { window.__dsHistDiag += ';ct=' + Object.keys(f.content).join('+'); }
+    }
+    var msgs = m0;
+    if (!msgs || !msgs.length) { return; }
+    if (!window.__dsHist) { window.__dsHist = []; }
+    for (var i = 0; i < msgs.length; i++) {
+      var m = msgs[i];
+      if (!m) { continue; }
+      var md = '';
+      if (typeof m.content === 'string' && m.content) { md = m.content; }
+      else if (m.content && typeof m.content.text === 'string') { md = m.content.text; }
+      if (!md && m.fragments && m.fragments.length) {
+        for (var fi = 0; fi < m.fragments.length; fi++) {
+          var fr = m.fragments[fi];
+          if (!fr) { continue; }
+          var ty = String(fr.type || '');
+          if (ty.indexOf('THINK') >= 0 || ty.indexOf('REQUEST') >= 0) { continue; }
+          if (typeof fr.content === 'string') { md += fr.content; }
+        }
+      }
+      if (!md) { continue; }
+      var id = String(m.message_id || m.id || '');
+      var hit = false;
+      for (var j = 0; j < window.__dsHist.length; j++) {
+        if (window.__dsHist[j].id === id) { window.__dsHist[j].md = md; hit = true; break; }
+      }
+      if (!hit && window.__dsHist.length < 80) { window.__dsHist.push({ id: id, md: md }); }
+    }
+    window.__dsHistCount = window.__dsHist.length;
+  }
+  window.__dsParseHist = parseHistory;
+  function store(u, txt) {
+    var full = String(u || '');
+    var k = full.indexOf('history_messages') >= 0 ? full.slice(0, 240) : full.split('?')[0].slice(0, 160);
+    if (!k) { return; }
+    var prev = window.__dsXhrMap[k];
+    if (!prev || txt.length > prev.length) {
+      window.__dsXhrMap[k] = txt.length > 400000 ? txt.slice(txt.length - 400000) : txt;
+      if (k.indexOf('history_messages') >= 0) {
+        if (!window.__dsHistBest || txt.length > window.__dsHistBest.length) {
+          window.__dsHistBest = String(txt).slice(0, 4000);
+        }
+        parseHistory(txt);
+      }
+      rebuild();
+    }
+  }
+  try {
+    var OX = window.XMLHttpRequest;
+    if (OX && OX.prototype) {
+      var oOpen = OX.prototype.open;
+      var oSend = OX.prototype.send;
+      OX.prototype.open = function(m, u) {
+        var url = String(u);
+        try {
+          if (window.__dsStripCache === 1 && url.indexOf('/chat/history_messages') >= 0 && url.indexOf('cache_version') >= 0) {
+            var qm = url.indexOf('?');
+            var base = url.slice(0, qm);
+            var parts = url.slice(qm + 1).split('&');
+            var keep = [];
+            for (var pi = 0; pi < parts.length; pi++) {
+              if (parts[pi].indexOf('cache_version') === 0) { continue; }
+              if (parts[pi].indexOf('cache_reset_at') === 0) { continue; }
+              keep.push(parts[pi]);
+            }
+            url = base + '?' + keep.join('&');
+          }
+        } catch (e6) { }
+        this.__dsUrl = url;
+        this.__dsHdrs = {};
+        var args2 = [];
+        for (var ai = 0; ai < arguments.length; ai++) { args2.push(ai === 1 ? url : arguments[ai]); }
+        return oOpen.apply(this, args2);
+      };
+      try {
+        var oSetH = OX.prototype.setRequestHeader;
+        if (oSetH) {
+          OX.prototype.setRequestHeader = function (k, v) {
+            try {
+              if (!this.__dsHdrs) { this.__dsHdrs = {}; }
+              this.__dsHdrs[String(k)] = String(v);
+              if (String(this.__dsUrl || '').indexOf('/chat/history_messages') >= 0) {
+                window.__dsHistHdrs = this.__dsHdrs;
+              }
+            } catch (e7) { }
+            return oSetH.apply(this, arguments);
+          };
+        }
+      } catch (e8) { }
+      OX.prototype.send = function() {
+        try {
+          var self = this;
+          var last = 0;
+          self.addEventListener('progress', function() {
+            try {
+              var rt = String(self.responseType || '');
+              var t = (rt === '' || rt === 'text') ? String(self.responseText || '') : '';
+              if (t.length > last) { last = t.length; store(self.__dsUrl, t); }
+            } catch (e9) { }
+          });
+          self.addEventListener('load', function() {
+            try {
+              var rt2 = String(self.responseType || '');
+              if (rt2 === '' || rt2 === 'text') { store(self.__dsUrl, String(self.responseText || '')); }
+            } catch (e10) { }
+          });
+        } catch (e8) { }
+        return oSend.apply(this, arguments);
+      };
+    }
+  } catch (e7) { }
+})();`;
+}
+
+export function buildHistoryFetchScript(): string {
+  return `(function(){
+  var parts = String(location.pathname || '').split('/');
+  var sid = '';
+  for (var pi2 = 0; pi2 < parts.length; pi2++) {
+    if (parts[pi2] === 's' && pi2 + 1 < parts.length) { sid = parts[pi2 + 1]; }
+  }
+  if (!sid) { return 'no-sid'; }
+  var url = '/api/v0/chat/history_messages?chat_session_id=' + encodeURIComponent(sid);
+  var hdr = {};
+  try {
+    var src = window.__dsHistHdrs || {};
+    // 只复用「认证类 + 站点自定义 + 协商类」头，且只发往同源的 history 接口；
+    // 不取 cookie/referer/origin，不打印、不持久化。
+    for (var hk2 in src) {
+      if (!Object.prototype.hasOwnProperty.call(src, hk2)) { continue; }
+      var lk = String(hk2).toLowerCase();
+      if (lk === 'authorization' || lk === 'accept' || lk === 'accept-language' ||
+          lk === 'content-type' || lk.indexOf('x-') === 0) {
+        hdr[hk2] = src[hk2];
+      }
+    }
+  } catch (e9) { }
+  if (!hdr['accept']) { hdr['accept'] = '*/*'; }
+  try {
+    fetch(url, { credentials: 'include', cache: 'no-store', headers: hdr })
+      .then(function (r) { return r.text(); })
+      .then(function (t) {
+        try { if (window.__dsParseHist) { window.__dsParseHist(t); } } catch (e) { }
+        window.__dsHistVersion = (window.__dsHistVersion || 0) + 1;
+        window.__dsHistNet = 'ok:' + String(t).length + ':' + String(t).slice(0, 70);
+      })
+      .catch(function (e2) { window.__dsHistNet = 'err:' + String(e2).slice(0, 40); });
+  } catch (e3) { return 'throw'; }
+  return 'fetching:' + sid;
+})();`;
+}
+
+/** 表格修复：仅对「单元格里残留未渲染 LaTeX」的表格，用原始 Markdown 重建并替换该表。 */
+export function buildTableRepairScript(): string {
+  return `(function(){
+  if (!window.katex) { return 'wait-katex'; }
+  if (window.__dsRepairInstalled) { return window.__dsRepairTables(); }
+  window.__dsRepairInstalled = 1;
+  function runRepair() {
+  var md = String(window.__dsMd || '');
+  var BS = String.fromCharCode(92);
+  var BT = String.fromCharCode(96);
+  var CMD = new RegExp(BS + BS + '[a-zA-Z]{2,}');
+  function splitCells(line) {
+    var out = []; var cur = ''; var i = 0; var n = line.length;
+    var st = 0; var code = false;
+    while (i < n) {
+      var ch = line.charAt(i);
+      var nx = line.charAt(i + 1);
+      if (code) {
+        cur += ch;
+        if (ch === BT) { code = false; }
+        i++; continue;
+      }
+      if (ch === BT && st === 0) { code = true; cur += ch; i++; continue; }
+      if (ch === BS) {
+        if (st === 0 && nx === '(') { st = 3; cur += ch + nx; i += 2; continue; }
+        if (st === 0 && nx === '[') { st = 4; cur += ch + nx; i += 2; continue; }
+        if (st === 3 && nx === ')') { st = 0; cur += ch + nx; i += 2; continue; }
+        if (st === 4 && nx === ']') { st = 0; cur += ch + nx; i += 2; continue; }
+        cur += ch + nx; i += 2; continue;
+      }
+      if (st === 0 && ch === '$') {
+        if (nx === '$') { st = 2; cur += ch + nx; i += 2; continue; }
+        st = 1; cur += ch; i++; continue;
+      }
+      if (st === 1 && ch === '$') { st = 0; cur += ch; i++; continue; }
+      if (st === 2 && ch === '$' && nx === '$') { st = 0; cur += ch + nx; i += 2; continue; }
+      if (st === 0 && ch === '|') { out.push(cur); cur = ''; i++; continue; }
+      cur += ch; i++;
+    }
+    out.push(cur);
+    return out;
+  }
+  function trimRow(cells) {
+    var a = cells.slice(0);
+    if (a.length > 0 && String(a[0]).trim() === '') { a.shift(); }
+    if (a.length > 0 && String(a[a.length - 1]).trim() === '') { a.pop(); }
+    return a;
+  }
+  function isSep(line) {
+    var s = String(line).trim();
+    if (s.indexOf('-') < 0 || s.indexOf('|') < 0) { return false; }
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charAt(i);
+      if (c === '|' || c === '-' || c === ':' || c === ' ') { continue; }
+      return false;
+    }
+    return true;
+  }
+  function parseTables(text) {
+    var rows = text.split(String.fromCharCode(10));
+    var out = []; var i = 0;
+    while (i < rows.length - 1) {
+      var a = rows[i]; var b = rows[i + 1];
+      if (a.indexOf('|') < 0 || !isSep(b)) { i++; continue; }
+      var head = trimRow(splitCells(a));
+      var body = []; var j = i + 2;
+      while (j < rows.length && rows[j].indexOf('|') >= 0 && String(rows[j]).trim() !== '') {
+        body.push(trimRow(splitCells(rows[j]))); j++;
+      }
+      if (head.length > 0) { out.push({ head: head, body: body }); }
+      i = j;
+    }
+    return out;
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function mathHtml(tex, disp) {
+    try {
+      return window.katex.renderToString(tex, { displayMode: !!disp, throwOnError: true, strict: 'ignore' });
+    } catch (e) {
+      return esc(tex);
+    }
+  }
+  function mdText(s) {
+    var out = ''; var i = 0; var n = s.length;
+    while (i < n) {
+      var ch = s.charAt(i);
+      if (ch === BT) {
+        var k0 = s.indexOf(BT, i + 1);
+        if (k0 > i) { out += '<code>' + esc(s.slice(i + 1, k0)) + '</code>'; i = k0 + 1; continue; }
+      }
+      if (ch === '*' && s.charAt(i + 1) === '*') {
+        var k1 = s.indexOf('**', i + 2);
+        if (k1 > i + 1) { out += '<strong>' + mdText(s.slice(i + 2, k1)) + '</strong>'; i = k1 + 2; continue; }
+      }
+      out += esc(ch); i++;
+    }
+    return out;
+  }
+  function renderInline(text) {
+    var s = String(text); var out = ''; var i = 0; var n = s.length; var buf = '';
+    function flush() { if (buf.length) { out += mdText(buf); buf = ''; } }
+    while (i < n) {
+      var ch = s.charAt(i); var nx = s.charAt(i + 1);
+      if (ch === BS && (nx === '(' || nx === '[')) {
+        var close = (nx === '(') ? BS + ')' : BS + ']';
+        var k = s.indexOf(close, i + 2);
+        if (k > 0) { flush(); out += mathHtml(s.slice(i + 2, k), nx === '['); i = k + 2; continue; }
+      }
+      if (ch === '$') {
+        var disp = (nx === '$');
+        var open = disp ? 2 : 1;
+        var j = i + open;
+        var end = -1;
+        while (j < n) {
+          if (s.charAt(j) === BS) { j += 2; continue; }
+          if (disp) { if (s.charAt(j) === '$' && s.charAt(j + 1) === '$') { end = j; break; } }
+          else if (s.charAt(j) === '$') { end = j; break; }
+          j++;
+        }
+        if (end > i) { flush(); out += mathHtml(s.slice(i + open, end), disp); i = end + open; continue; }
+      }
+      buf += ch; i++;
+    }
+    flush();
+    return out.split(String.fromCharCode(10)).join('<br>');
+  }
+  function buildTable(t) {
+    var tb = document.createElement('table');
+    tb.className = 'ds-md-repaired ds-tbl-fixed';
+    var thead = document.createElement('thead');
+    var trh = document.createElement('tr');
+    for (var i = 0; i < t.head.length; i++) {
+      var th = document.createElement('th');
+      th.innerHTML = renderInline(t.head[i]);
+      trh.appendChild(th);
+    }
+    thead.appendChild(trh);
+    tb.appendChild(thead);
+    var tbody = document.createElement('tbody');
+    for (var r = 0; r < t.body.length; r++) {
+      var tr = document.createElement('tr');
+      var row = t.body[r];
+      for (var c = 0; c < t.head.length; c++) {
+        var td = document.createElement('td');
+        td.innerHTML = renderInline(c < row.length ? row[c] : '');
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    tb.appendChild(tbody);
+    return tb;
+  }
+  // —— 原文证据比对 ——
+  // 单元格的「可见文本」：一片公式在页面里是两份（视觉层 + 无障碍 MathML），
+  // 比对时必须剔掉 MathML，否则任何公式格都对不上。
+  function visibleText(el) {
+    var c = el.cloneNode(true);
+    var mml = c.querySelectorAll ? c.querySelectorAll('.katex-mathml') : [];
+    for (var i = 0; i < mml.length; i++) {
+      if (mml[i].parentNode) { mml[i].parentNode.removeChild(mml[i]); }
+    }
+    return String(c.textContent || '');
+  }
+  // 比对用的归一化：只做 NFKC 与空白折叠，**不删**等号/括号等符号 ——
+  // 删符号会把「内容真的丢了」也一起抹平。
+  function normCmp(s) {
+    var v = String(s || '');
+    try { if (v.normalize) { v = v.normalize('NFKC'); } } catch (e) { }
+    var out = '';
+    var prevSpace = false;
+    for (var i = 0; i < v.length; i++) {
+      var code = v.charCodeAt(i);
+      var sp = (code <= 32) || code === 160 || code === 8199 || code === 8239 || code === 12288;
+      if (sp) {
+        if (!prevSpace) { out += ' '; prevSpace = true; }
+      } else {
+        out += v.charAt(i); prevSpace = false;
+      }
+    }
+    var a0 = 0, b0 = out.length;
+    while (a0 < b0 && out.charAt(a0) === ' ') { a0++; }
+    while (b0 > a0 && out.charAt(b0 - 1) === ' ') { b0--; }
+    return out.substring(a0, b0);
+  }
+  function brokenCell(c) {
+    var txt = String(c.textContent || '');
+    if (txt.indexOf(BS) < 0) { return false; }
+    if (c.querySelector('.katex')) { return false; }
+    return new RegExp(BS + BS + '[a-zA-Z]{2,}').test(txt);
+  }
+  // 单元格是否像「被 | 切开的残片」：站点先按 | 切列再逐格渲染，绝对值/行列式里的竖线
+  // 会把一条公式劈进两个格子，于是出现 (dV= 、,du,dv,dw) 这种片段 —— 它们本身没有反斜杠
+  // 命令、甚至有一半还能正常渲染，brokenCell 抓不到，必须按形状判定。
+  function fragmentCell(c) {
+    var t2 = normCmp(visibleText(c));
+    if (t2 === '' || t2.length > 40) { return false; }
+    var open = 0;
+    var close = 0;
+    for (var fi = 0; fi < t2.length; fi++) {
+      var ch2 = t2.charAt(fi);
+      if (ch2 === '(') { open++; } else if (ch2 === ')') { close++; }
+    }
+    if (open !== close) { return true; }
+    var first2 = t2.charAt(0);
+    if (first2 === ',' || first2 === ';') { return true; }
+    if (t2.charAt(t2.length - 1) === '=') { return true; }
+    return false;
+  }
+  // 只有「等号开头」这一条额外形状：站点把 x2+y2+z2=rho2 吞成 =rho2 时只剩尾巴，
+  // 这种形状**只用来决定要不要去查原文**，真正替换必须靠原文比对证明（damageProof）。
+  function eqLeadingCell(c) {
+    // 用可见文本判定：站点把 x2+y2+z2=rho2 吞成 =rho2 时，这一格仍是渲染好的公式，
+    // 只有剔除 MathML 之后的可见文本才看得到那个开头的等号。
+    var t3 = normCmp(visibleText(c));
+    if (t3 === '' || t3.length > 40) { return false; }
+    return t3.charAt(0) === '=';
+  }
+  // 疑似异常：只决定「要不要为这张表去找原始 Markdown」，不等于要替换。
+  function suspiciousTable(tb) {
+    var cells = tb.querySelectorAll('td,th');
+    for (var i = 0; i < cells.length; i++) {
+      if (brokenCell(cells[i]) || fragmentCell(cells[i]) || eqLeadingCell(cells[i])) { return true; }
+    }
+    return false;
+  }
+  function normText(s) {
+    return String(s || '').replace(/\s+/g, ' ').trim();
+  }
+  var cands = [];
+  var candId = [];
+  // 解析缓存：runRepair 每 1.5s 跑一次，__dsHist 里的 Markdown 是稳定的，
+  // 按 (messageId + hist 版本) 缓存 parseTables 结果，只有版本变化才重新切分。
+  var pcache = window.__dsParseCache || (window.__dsParseCache = {});
+  var pver = String(window.__dsHistVersion || 0);
+  function histTablesOf(entry) {
+    var key = String(entry.id || '') + '#' + pver;
+    var hit = pcache[key];
+    if (hit) { return hit; }
+    var t = parseTables(String(entry.md || ''));
+    pcache[key] = t;
+    var nk = 0;
+    var ks = Object.keys(pcache);
+    for (var i = 0; i < ks.length; i++) {
+      nk++;
+      if (nk > 60) { delete pcache[ks[i]]; }
+    }
+    return t;
+  }
+  var streamTables = parseTables(md);
+  for (var s0 = 0; s0 < streamTables.length; s0++) { cands.push(streamTables[s0]); candId.push(String(window.__dsStreamMsgId || '#LAST')); }
+  var hist = window.__dsHist || [];
+  for (var h0 = 0; h0 < hist.length; h0++) {
+    var ht = histTablesOf(hist[h0]);
+    for (var q0 = 0; q0 < ht.length; q0++) { cands.push(ht[q0]); candId.push(String(hist[h0].id || '')); }
+  }
+  var domTables = document.querySelectorAll('table');
+  if (domTables.length === 0) { return 'no-dom-table'; }
+  function normAll(s) {
+    var src = String(s || '');
+    var out = '';
+    for (var i = 0; i < src.length; i++) {
+      var ch = src.charAt(i);
+      if (ch.charCodeAt(0) > 32) { out += ch; }
+    }
+    return out.toLowerCase();
+  }
+  function plainCells(t) {
+    var out = [];
+    var all = [];
+    var i = 0;
+    for (i = 0; i < t.head.length; i++) { all.push(t.head[i]); }
+    for (i = 0; i < t.body.length; i++) {
+      for (var j = 0; j < t.body[i].length; j++) { all.push(t.body[i][j]); }
+    }
+    for (i = 0; i < all.length && out.length < 14; i++) {
+      var s = String(all[i] || '');
+      if (s.indexOf(BS) >= 0) { continue; }
+      var n = normAll(s);
+      if (n.length < 3) { continue; }
+      if (out.indexOf(n) < 0) { out.push(n); }
+    }
+    return out;
+  }
+  var candCells = [];
+  for (var c0 = 0; c0 < cands.length; c0++) { candCells.push(plainCells(cands[c0])); }
+  function itemKeyOf(el) {
+    var p = el, lv = 0;
+    while (p && lv < 8) {
+      var k = null;
+      try { k = p.getAttribute ? p.getAttribute('data-virtual-list-item-key') : null; } catch (e) { }
+      if (k !== null && k !== '') { return String(k); }
+      p = p.parentElement; lv++;
+    }
+    return '';
+  }
+  function lastMsgEl() {
+    var all = document.querySelectorAll('.ds-message');
+    return all.length > 0 ? all[all.length - 1] : null;
+  }
+  function fpOf(el, mid) {
+    var head = '';
+    try {
+      var th = el.querySelector('th');
+      head = th ? String(th.textContent || '') : '';
+    } catch (e0) { }
+    var s = '';
+    for (var i = 0; i < head.length; i++) {
+      var ch = head.charAt(i);
+      if (ch.charCodeAt(0) > 32) { s += ch; }
+    }
+    return String(mid) + '|' + s.slice(0, 24);
+  }
+  // 用原文生成的参考表格逐格证明「站点确实丢了内容」。返回证据类型，'' 表示证明不了。
+  //   tail : 站点只剩原文的末尾片段（例如原文 x2+y2+z2=rho2，站点只剩 =rho2）
+  //   raw  : 站点留着未渲染的 LaTeX，而原文这边渲染成功
+  //   frag : 站点以逗号/分号开头（被竖线切开的残片）
+  //   cut  : 站点以等号结尾（后半截被切走）
+  function damageProof(domTb, refTb) {
+    var dc = domTb.querySelectorAll('td,th');
+    var rc = refTb.querySelectorAll('td,th');
+    var n = dc.length < rc.length ? dc.length : rc.length;
+    if (n === 0) { return ''; }
+
+    for (var i = 0; i < n; i++) {
+      var a = normCmp(visibleText(dc[i]));
+      var e = normCmp(visibleText(rc[i]));
+      if (a === e || a === '') { continue; }
+
+      if (e.length > a.length && e.lastIndexOf(a) === e.length - a.length) { return 'tail'; }
+      if (dc[i].querySelector('.katex') === null && rc[i].querySelector('.katex') !== null) {
+        if (String(dc[i].textContent || '').indexOf(BS) >= 0) { return 'raw'; }
+      }
+      var f = a.charAt(0);
+      if ((f === ',' || f === ';') && e.charAt(0) !== f) { return 'frag'; }
+      if (a.charAt(a.length - 1) === '=' && e.charAt(a.length - 1) !== '=') { return 'cut'; }
+    }
+    return '';
+  }
+  // 已经证明不了的表不必每 1.5s 重算一遍参考表格：按 指纹+版本 记下结论。
+  var rejected = 0;
+  function rejKeyOf(fp) {
+    return fp + '|' + String(window.__dsMdVersion || 0) + '|' + String(window.__dsHistVersion || 0);
+  }
+  var used = [];
+  var fixed = 0;
+  var need = [];
+  for (var d = 0; d < domTables.length && fixed < 6; d++) {
+    var dt = domTables[d];
+    if (dt.className && String(dt.className).indexOf('ds-md-repaired') >= 0) { continue; }
+    if (!suspiciousTable(dt)) { continue; }
+    var mid = itemKeyOf(dt);
+    var domText = normAll(dt.textContent);
+    var bestScore = 0;
+    var bestIdx = -1;
+    var tie = false;
+    if (mid === '') {
+      // 没有虚拟列表键（个别布局/流式早期）：只有落在「最后一条消息」里的表才用当前流式原文，
+      // 其余一律跳过 —— 不跨消息、不跨会话猜。
+      var lm = lastMsgEl();
+      if (lm && lm.contains(dt)) { mid = '#LAST'; }
+    }
+    if (mid === '') { continue; }
+    var hasOwn = false;
+    for (var z0 = 0; z0 < candId.length; z0++) { if (candId[z0] === mid) { hasOwn = true; break; } }
+    if (!hasOwn) { need.push(fpOf(dt, mid)); continue; }
+    for (var m = 0; m < cands.length; m++) {
+      if (used.indexOf(m) >= 0) { continue; }
+      if (candId[m] !== mid) { continue; }
+      var sc = 0;
+      var cc = candCells[m];
+      for (var x = 0; x < cc.length; x++) {
+        if (domText.indexOf(cc[x]) >= 0) { sc++; }
+      }
+      var firstTh = dt.querySelector('th');
+      if (firstTh && normAll(firstTh.textContent) === normAll(cands[m].head[0])) { sc += 3; }
+      if (sc > bestScore) { bestScore = sc; bestIdx = m; tie = false; }
+      else if (sc === bestScore && sc > 0) { tie = true; }
+    }
+    if (bestIdx < 0 || bestScore < 2 || tie) {
+      if (bestIdx >= 0) { need.push(fpOf(dt, mid)); }
+      continue;
+    }
+    var built = buildTable(cands[bestIdx]);
+    var rk = rejKeyOf(fpOf(dt, mid));
+    var rej = window.__dsRej || (window.__dsRej = {});
+    if (rej[rk]) { rejected++; continue; }
+    var proof = damageProof(dt, built);
+    if (proof === '') {
+      // 形状可疑但原文证明不了「真的丢了内容」→ 保留站点原样，不替换。
+      rej[rk] = 1;
+      rejected++;
+      continue;
+    }
+    used.push(bestIdx);
+    if (dt.parentNode) {
+      dt.parentNode.replaceChild(built, dt);
+      fixed++;
+    }
+  }
+  if (cands.length === 0 && need.length === 0) { return 'wait-md'; }
+  var out2 = 'fixed=' + fixed + ' / mdv=' + String(window.__dsMdVersion || 0) +
+    ' / histv=' + String(window.__dsHistVersion || 0);
+  if (rejected > 0) { out2 += ' / rej=' + rejected; }
+  if (need.length > 0) { out2 += ' / need=' + need.slice(0, 3).join(';'); }
+  return out2;
+  }
+  window.__dsRepairTables = runRepair;
+  try {
+    if (!window.__dsRepairObs && window.MutationObserver) {
+      window.__dsRepairObs = new MutationObserver(function () {
+        if (window.__dsRepairScheduled) { return; }
+        window.__dsRepairScheduled = 1;
+        setTimeout(function () {
+          window.__dsRepairScheduled = 0;
+          try { runRepair(); } catch (e) { }
+        }, 80);
+      });
+      window.__dsRepairObs.observe(document.body, { childList: true, subtree: true });
+    }
+  } catch (e) { }
+  return runRepair();
+})();`;
+}
+
+/**
+ * 关闭「显示优化」时在页面里做的收尾：停掉两个观察者与挂起的定时器。
+ *
+ * 已经替换过的节点保持原样（要彻底回到站点原始渲染需要刷新页面），
+ * 但不会再有任何新的扫描/替换，也不会再补拉历史原文。
+ */
+/**
+ * 暂停表格修复（应用切到后台时调用）。
+ *
+ * 只摘掉表格修复的 DOM 观察者，**不动**公式补渲染那个观察者：后台不会产生 DOM 变化，
+ * 留着一个随时可能触发 `runRepair()`（进而补拉历史原文）的观察者没有意义；
+ * 回到前台后第一次轮询会重新安装它并立刻跑一轮，把后台期间新增的 DOM 补上。
+ */
+export function buildTableRepairPauseScript(): string {
+  return `(function () {
+    try {
+      if (window.__dsRepairObs) { window.__dsRepairObs.disconnect(); window.__dsRepairObs = null; }
+    } catch (e1) { }
+    try {
+      window.__dsRepairInstalled = false;
+      window.__dsRepairTables = null;
+      window.__dsRepairScheduled = false;
+    } catch (e2) { }
+    return 'table-repair-paused';
+  })();`;
+}
+export function buildDisplayFixOffScript(): string {
+  return `(function () {
+    try {
+      if (window.__dsMathFixObserver) {
+        window.__dsMathFixObserver.disconnect();
+        window.__dsMathFixObserver = null;
+      }
+    } catch (e1) { }
+    try {
+      if (window.__dsMathFixTimer) { clearTimeout(window.__dsMathFixTimer); window.__dsMathFixTimer = 0; }
+    } catch (e2) { }
+    try {
+      if (window.__dsRepairObs) { window.__dsRepairObs.disconnect(); window.__dsRepairObs = null; }
+    } catch (e3) { }
+    try {
+      window.__dsRepairInstalled = false;
+      window.__dsRepairTables = null;
+    } catch (e4) { }
+    return 'display-fix-off';
+  })();`;
+}
+

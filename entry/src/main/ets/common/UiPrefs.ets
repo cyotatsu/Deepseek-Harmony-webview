@@ -37,6 +37,9 @@ const KEY_TEXT_ZOOM: string = 'web_text_zoom';
  */
 const KEY_WEB_DARK: string = 'web_dark';
 
+/** 「显示优化」开关（公式补渲染 / 表格修复 / 排版兜底 CSS），默认开启 */
+const KEY_DISPLAY_FIX: string = 'web_display_fix';
+
 function openStore(context: common.Context): preferences.Preferences | null {
   try {
     return preferences.getPreferencesSync(context, { name: STORE_NAME });
@@ -320,6 +323,41 @@ export function loadWebDark(context: common.Context): boolean {
   } catch (err) {
     hilog.warn(DOMAIN, TAG, 'Failed to load web dark flag');
     return false;
+  }
+}
+
+/**
+ * 读取「显示优化」开关。
+ *
+ * 默认 true：这些修复只在站点自己渲染失败时生效，正常情况下用户看不到差别；
+ * 关掉即可回到站点原始渲染（用于排查「是不是优化导致的」）。
+ */
+export function loadDisplayFix(context: common.Context): boolean {
+  const store: preferences.Preferences | null = openStore(context);
+  if (!store) {
+    return true;
+  }
+  try {
+    return store.getSync(KEY_DISPLAY_FIX, true) as boolean;
+  } catch (err) {
+    hilog.warn(DOMAIN, TAG, 'Failed to load display fix flag');
+    return true;
+  }
+}
+
+/** 保存「显示优化」开关 */
+export function saveDisplayFix(context: common.Context, enabled: boolean): void {
+  const store: preferences.Preferences | null = openStore(context);
+  if (!store) {
+    return;
+  }
+  try {
+    store.putSync(KEY_DISPLAY_FIX, enabled);
+    store.flush().catch(() => {
+      hilog.warn(DOMAIN, TAG, 'Failed to flush display fix flag');
+    });
+  } catch (err) {
+    hilog.warn(DOMAIN, TAG, 'Failed to save display fix flag');
   }
 }
 

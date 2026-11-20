@@ -21,6 +21,9 @@ export struct SettingsSheet {
   onResetFabPosition: () => void = () => {};
   onToggleHideOnSnap: (enabled: boolean) => void = () => {};
   onToggleAutoSnap: (enabled: boolean) => void = () => {};
+  /** 「显示优化」开关当前值（公式/表格修复的总开关） */
+  @Prop displayFixOn: boolean = true;
+  onToggleDisplayFix: (enabled: boolean) => void = () => {};
 
   // ── 网页显示相关 ──
   /**
@@ -479,6 +482,23 @@ export struct SettingsSheet {
 
           // ── 显示 ──
           this.sectionTitle($r('app.string.settings_section_display'))
+
+          // 显示优化总开关：公式补渲染 / 表格修复 / 排版兜底
+          Row() {
+            this.actionRow($r('app.string.settings_display_fix'), $r('app.string.settings_display_fix_desc'))
+            Toggle({ type: ToggleType.Switch, isOn: this.displayFixOn })
+              .switchStyle({
+                unselectedColor: this.pal().switchOff,
+                pointColor: this.pal().sliderThumb
+              })
+              .selectedColor(this.pal().accent)
+              .onChange((isOn: boolean) => this.onToggleDisplayFix(isOn))
+          }
+          .width('100%')
+          .padding({ left: 20, right: 20, top: 12, bottom: 12 })
+          .alignItems(VerticalAlign.Center)
+
+          Divider().color($r('app.color.progress_track')).opacity(0.15)
 
           // 字号入口：只显示当前值，点进去才是字号页（带预览与滑杆）
           Row() {

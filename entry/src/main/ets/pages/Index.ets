@@ -27,6 +27,13 @@ import { buildUserAgent, buildViewportFixScript, buildResizeNotifyScript,
   isDismissClicked, buildComposerAutoHideScript, buildKeyboardStateScript, buildRetryFocusScript,
   buildBaseFontProbeScript,
   buildPageThemeProbeScript,
+  buildMathRepairScript,
+  buildScrollFixScript,
+  buildSniffScript,
+  buildTableRepairScript,
+  buildTableRepairPauseScript,
+  buildDisplayFixOffScript,
+  buildHistoryFetchScript,
   VIEWPORT_RESIZE_DEBOUNCE_MS } from '../common/WebViewport';
 import { buildFocusGuardScript, ENABLE_IMAGE_TAP_FOCUS_GUARD } from '../common/WebInputGuard';
 import { decideBackAction, BackContext, EXIT_CONFIRM_WINDOW_MS,
@@ -42,7 +49,8 @@ import { UploadSheet } from '../components/UploadSheet';
 import { isRefreshConfirmSkipped, setRefreshConfirmSkipped,
   isFloatingHideOnSnap, setFloatingHideOnSnap,
   isFloatingAutoSnap, setFloatingAutoSnap,
-  loadTextZoom, saveTextZoom, loadWebDark, saveWebDark } from '../common/UiPrefs';
+  loadTextZoom, saveTextZoom, loadWebDark, saveWebDark,
+  loadDisplayFix, saveDisplayFix } from '../common/UiPrefs';
 import { KEY_FAB_HIDE_ON_SNAP, KEY_FAB_AUTO_SNAP, KEY_FAB_RESET_POS,
   KEY_WEB_TEXT_ZOOM } from '../common/AppConfig';
 import { clampTextZoom, TEXT_ZOOM_DEFAULT } from '../common/FontZoom';
@@ -81,6 +89,9 @@ const BACK_PROBE_TIMEOUT_MS: number = 500;
 const THEME_PROBE_FAST_MS: number = 300;
 const THEME_PROBE_SLOW_MS: number = 2000;
 const THEME_PROBE_FAST_WINDOW_MS: number = 10000;
+
+/** 表格修复轮询间隔（ms）：流式过程中表格可能还没渲染完，等它稳定即可，不必太快 */
+const TABLE_REPAIR_INTERVAL_MS: number = 1500;
 
 /**
  * 系统深浅色变化后的密集补探节奏（ms / 次数）。
@@ -197,6 +208,8 @@ struct Index {
    * 只跟系统走的话球会与网页底色撞在一起（白底白图标）。
    */
   @State webIsDark: boolean = false;
+  /** 「显示优化」开关：公式补渲染 / 表格修复 / 排版兜底 CSS 的总开关（持久化，默认开） */
+  @State displayFixOn: boolean = true;
   // 设置面板是否停在「字体大小」子页（列表 → 字号页）
   @State fontPage: boolean = false;
   // 网页正文的实际字号（CSS px），供设置里的字号预览对齐；测不到时用 16
@@ -215,6 +228,9 @@ struct Index {
     this.startDebugProbe();
     // 网页主题轮询：站点在网页里自己切深浅色时，悬浮球配色要跟着变
     this.startThemeProbe();
+    if (this.displayFixOn) {
+      this.startTableRepair();
+    }
     // 冷启动携带的 DeepLink 直接作为 Web 的初始 src。
     // 不能等到 onPageShow 再 loadUrl —— 那会比 onControllerAttached 早约 35ms，
     // 控制器尚未绑定必然抛异常；即便推迟到 onControllerAttached，
@@ -314,6 +330,12 @@ struct Index {
     Column() {
       Stack({ alignContent: Alignment.Top }) {
         Web({ src: this.initialUrl, controller: this.controller })
+          // 临时验证：文档开始阶段只读嗅探 fetch/SSE，确认能否拿到模型原始 Markdown。
+          .runJavaScriptOnDocumentStart([{
+            // 关掉显示优化时不要装嗅探钩子，省掉一份内存与一次请求包装
+            script: this.displayFixOn ? buildSniffScript() : '(function(){})();',
+            scriptRules: ['*']
+          }])
           .domStorageAccess(true)
           .javaScriptAccess(true)
           // fileAccess 必须为 true：自 API 12 起该属性默认值为 false，
@@ -422,6 +444,14 @@ struct Index {
             // 主题探测在加载期间一律跳过：新文档首帧之前 body 是空的，
             // 探到的「浅色」是假值，会让悬浮球先白一下。见 probePageTheme。
             this.pageLoading = true;
+            // 新文档里没有注入过 KaTeX 与公式补渲染脚本，重新允许安装
+            this.mathRepairInstalled = false;
+            // 新文档的 window.__dsHist 已被清空；去重表若留着，就会出现
+            // 「原文没了、但任务已标记 tried，不再补拉」→ 两边必须同生命周期。
+            this.histTried.clear();
+            // 新文档里在途的 runJavaScript 不会再回来，这里必须复位，
+            // 否则 histFetching 永远是 true，后续 need 只会被排队、永远发不出请求。
+            this.histFetching = false;
             // 上看门狗：onPageEnd 万一不触发，15s 后强制放行，否则主题探测永久停摆。
             this.armPageLoadWatchdog();
             this.isError = false;
@@ -477,6 +507,11 @@ struct Index {
             // 装上「编辑历史消息 + 键盘弹出时隐藏主对话框」的脚本，
             // 并把当前键盘状态同步过去（可能在键盘已经弹着的时候页面才加载完）
             this.applyComposerAutoHide();
+            // 补渲染模型漏写定界符的公式（站点渲染器会整段放弃，只留裸 LaTeX）
+            if (this.displayFixOn) {
+              this.applyMathRepair();
+              this.applyScrollFix();
+            }
 
             // 打印一次运行时视口诊断，便于实机确认 viewport 是否真的生效
             this.probeViewport();
@@ -877,11 +912,19 @@ struct Index {
    */
   onPageHide(): void {
     this.stopThemeProbe();
+    if (this.displayFixOn) {
+      this.pauseTableRepair();
+    }
     // 后台期间网页不会换主题，补探队列留着没有意义（也会白唤起 JS）
     this.clearThemeBurstProbe();
   }
 
   onPageShow(): void {
+    if (this.displayFixOn) {
+      // 幂等：定时器已存在时 startTableRepair 直接返回；页面里的观察者也有
+      // __dsRepairInstalled 守门，重复调用不会叠加。
+      this.startTableRepair();
+    }
     // 回到前台恢复轮询（不在这里立刻探一次：冷启动时 Web 控制器还没挂上，
     // runJavaScript 会抛异常；轮询 1.2s 内就会自己探到）。
     this.startThemeProbe();
@@ -1600,7 +1643,90 @@ struct Index {
     }, VIEWPORT_RESIZE_DEBOUNCE_MS);
   }
 
-  /** 补发一次 resize 事件，唤醒「只在加载时读一次宽度」的 SPA */
+  /** KaTeX 源码缓存（rawfile，约 275KB，只读一次） */
+  private katexSource: string = '';
+  private sniffTimer: number = -1;
+  private lastTableRepair: string = '';
+  // 历史补拉是「整段会话」级别的：一次 /chat/history_messages 会把该会话所有消息都拿回来，
+  // 所以同一时刻只允许一个请求在飞，避免同一会话多张疑似坏表各自发起一次重复请求。
+  private histFetching: boolean = false;
+  private histFetchAt: number = 0;
+  private histTried: Set<string> = new Set<string>();
+  /** 当前文档是否已注入 KaTeX + 补渲染脚本（每个文档注入一次，导航后重置） */
+  private mathRepairInstalled: boolean = false;
+
+  /**
+   * 从 rawfile 读一次 KaTeX 源码并缓存。
+   *
+   * 为什么自带一份：站点的公式渲染器不暴露全局实现（实测 `window.katex === undefined`），
+   * 想在应用侧补渲染就只能自己带。站点的 KaTeX 样式表已经在页面里了（正常公式都带
+   * `.katex` 类并被正确排版），因此只需要 JS，不需要再带 CSS 和字体。
+   */
+  private loadKatexSource(): string {
+    if (this.katexSource !== '') {
+      return this.katexSource;
+    }
+    try {
+      const data: Uint8Array =
+        getContext(this).resourceManager.getRawFileContentSync('katex/katex.min.js');
+      const decoder: util.TextDecoder = util.TextDecoder.create('utf-8');
+      const text: string = decoder.decodeToString(data);
+      if (text !== '') {
+        this.katexSource = text;
+      }
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to load KaTeX from rawfile');
+    }
+    return this.katexSource;
+  }
+
+  /**
+   * 注入 KaTeX 并安装「裸 LaTeX 补渲染」脚本（每个文档一次）。
+   *
+   * 为什么需要：模型偶尔会把显示公式的闭合定界符写成 `]`（少一个反斜杠），
+   * 站点渲染器认不出定界符就整段放弃，把 `\frac{...}` 当普通文字留在段落里；
+   * 同一条回答里其他公式照常渲染，于是表现为「偶发」。
+   */
+  private applyMathRepair(): void {
+    if (this.mathRepairInstalled) {
+      return;
+    }
+    const src: string = this.loadKatexSource();
+    if (src === '') {
+      return;
+    }
+    this.mathRepairInstalled = true;
+    try {
+      this.controller.runJavaScript('(function(){' + src + '\n}).call(window);')
+        .then(() => this.controller.runJavaScript(buildMathRepairScript()))
+        .then((result: string) => {
+          const text: string = this.unwrapJsString(result);
+          // 每次「文档级注入成功」只打一条（applyMathRepair 由 mathRepairInstalled 守门，
+          // SPA 里的 MutationObserver 修复不会再走这里）：既是版本+自检凭据，也让
+          // runJavaScript 回 null / no-katex / bad / err 无法被静默吞掉。
+          hilog.info(DOMAIN, TAG, 'math repair: %{public}s', text);
+        })
+        .catch((err: BusinessError) => {
+          this.mathRepairInstalled = false;
+          hilog.warn(DOMAIN, TAG, 'math repair failed: %{public}d', err.code);
+        });
+    } catch (err) {
+      this.mathRepairInstalled = false;
+      hilog.warn(DOMAIN, TAG, 'Failed to apply math repair');
+    }
+  }
+
+  /** 给代码块/行间公式加滚动兜底样式（幂等，站点改版也不影响版式）。 */
+  private applyScrollFix(): void {
+    try {
+      this.controller.runJavaScript(buildScrollFixScript())
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'scroll fix failed: %{public}d', err.code);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to apply scroll fix');
+    }
+  }
   private notifyViewportResize(): void {
     // 窗口宽度变了 → 布局视口宽度也必须跟着变，否则页面仍按旧宽度排版
     //（自由多窗拖拽时宽度连续变化，这里已经过防抖）
@@ -1684,6 +1810,119 @@ struct Index {
    * 启动调试用的诊断取样定时器（仅在 DEBUG_PROBE_INTERVAL_MS > 0 时生效）。
    * 便于在「键盘开着、输入框里有长文本」的任意时刻抓取一次运行时快照。
    */
+  /**
+   * 表格修复轮询：站点把 `|` 当列分隔符，公式里的绝对值/行列式竖线会被劈成多个 <td>，
+   * 每段 LaTeX 都不配对 → 站点放弃渲染、留下纯文本。这里用 document-start 嗅探拿到的
+   * 原始 Markdown 重建那一张表（只在检测到破损单元格时才替换，其它表格不动）。
+   */
+  /** 停掉表格修复轮询（关闭「显示优化」时调用） */
+  private stopTableRepair(): void {
+    if (this.sniffTimer === -1) { return; }
+    clearInterval(this.sniffTimer);
+    this.sniffTimer = -1;
+    this.lastTableRepair = '';
+  }
+
+  /**
+   * 切换「显示优化」。
+   *
+   * 关闭：立即停掉轮询与页面里的观察者，之后的页面加载不再注入任何修复脚本。
+   * 开启：对当前页面立刻补一次（公式 + 排版兜底），并恢复轮询。
+   * 已替换过的节点不还原 —— 想完全回到站点原始渲染，刷新一次页面即可。
+   */
+  private setDisplayFix(enabled: boolean): void {
+    if (this.displayFixOn === enabled) {
+      return;
+    }
+    this.displayFixOn = enabled;
+    const ctx = getContext(this) as common.UIAbilityContext;
+    saveDisplayFix(ctx, enabled);
+    if (!enabled) {
+      this.stopTableRepair();
+      try {
+        this.controller.runJavaScript(buildDisplayFixOffScript()).catch(() => { });
+      } catch (err) {
+        hilog.warn(DOMAIN, TAG, 'Failed to turn display fix off');
+      }
+      return;
+    }
+    // 重新开启：允许再次注入 KaTeX / 观察者
+    this.mathRepairInstalled = false;
+    this.applyMathRepair();
+    this.applyScrollFix();
+    this.startTableRepair();
+  }
+
+  private startTableRepair(): void {
+    if (this.sniffTimer !== -1) { return; }
+    this.sniffTimer = setInterval(() => this.tableRepairTick(), TABLE_REPAIR_INTERVAL_MS);
+    // 立刻跑一轮：冷启动补上首批内容；从后台回到前台时补上后台期间新增的 DOM。
+    // 轮询本身仍有 1.5s 兜底，这里只是把「等一个周期」省掉。
+    this.tableRepairTick();
+  }
+
+  /**
+   * 暂停表格修复（应用切到后台）。
+   *
+   * 除了停掉 1.5s 轮询，还要摘掉页面里的表格观察者：否则站点一有 DOM 变化就会
+   * 触发 `runRepair()`，进而发起历史原文补拉 —— 后台不该有任何这类请求。
+   */
+  private pauseTableRepair(): void {
+    this.stopTableRepair();
+    try {
+      this.controller.runJavaScript(buildTableRepairPauseScript()).catch(() => { });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Failed to pause table repair');
+    }
+  }
+
+  /** 单轮表格修复：扫描 → 只在真的替换了表格时记一条 → 对没试过的破损表补拉历史原文 */
+  private tableRepairTick(): void {
+    try {
+      this.controller.runJavaScript(buildTableRepairScript()).then((r: string) => {
+        const t: string = this.unwrapJsString(r);
+        // 只在真的替换了表格时记一条，其它状态（wait-md / fixed=0）静默
+        if (t !== this.lastTableRepair) {
+          this.lastTableRepair = t;
+          hilog.info(DOMAIN, TAG, 'TableRepair %{public}s', t);
+        }
+        const ni: number = t.indexOf('/ need=');
+        if (ni >= 0) {
+          const list: string[] = t.substring(ni + 7).split(';');
+          for (let i = 0; i < list.length; i++) {
+            const item: string = list[i];
+            if (item === '' || this.histTried.has(item)) { continue; }
+            this.histTried.add(item);
+            // 已经有一个请求在飞：这条 need 也一并满足（响应里含整段会话），不再重复发起。
+            if (this.histFetching) {
+              // 在途超时自愈：请求可能因页面切换/进程回收而不回来，
+              // 超过 10s 就认为它已失效，允许下一条 need 重新发起（去重仍由 histTried 保证）。
+              if (Date.now() - this.histFetchAt > 10000) {
+                this.histFetching = false;
+              } else {
+                hilog.info(DOMAIN, TAG, 'HistFetchQueued %{public}s', item);
+                continue;
+              }
+            }
+            this.histFetching = true;
+            this.histFetchAt = Date.now();
+            hilog.info(DOMAIN, TAG, 'HistFetch %{public}s', item);
+            this.controller.runJavaScript(buildHistoryFetchScript()).then((f: string) => {
+              hilog.info(DOMAIN, TAG, 'HistFetchStart %{public}s', this.unwrapJsString(f));
+              this.histFetching = false;
+              // 原文已经写进 __dsHist，立刻重扫一轮，不必等下一个 1.5s。
+              this.tableRepairTick();
+            }).catch(() => {
+              this.histFetching = false;
+            });
+          }
+        }
+      }).catch(() => { });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'Table repair tick failed');
+    }
+  }
+
   private startDebugProbe(): void {
     if (DEBUG_PROBE_INTERVAL_MS <= 0) {
       return;
@@ -2108,6 +2347,7 @@ struct Index {
       // 悬浮球配色：先用**上次退出时**的网页深浅色渲染，避免每次冷启动都先闪一下浅色。
       // 页面加载完成 / 轮询探测到真实主题后会自动纠正（见 probePageTheme）。
       this.webIsDark = loadWebDark(ctx);
+      this.displayFixOn = loadDisplayFix(ctx);
       // 状态栏也先按上次的网页主题同步，避免冷启动先亮一下再翻。
       this.syncStatusBar(this.webIsDark);
     } catch (err) {
@@ -2230,6 +2470,8 @@ struct Index {
       onResetFabPosition: () => this.resetFabPosition(),
       onToggleHideOnSnap: (enabled: boolean) => this.setHideOnSnap(enabled),
       onToggleAutoSnap: (enabled: boolean) => this.setAutoSnap(enabled),
+      displayFixOn: this.displayFixOn,
+      onToggleDisplayFix: (enabled: boolean) => this.setDisplayFix(enabled),
       onClearCache: () => this.clearAppCache(),
       onOpenFeedback: () => this.openInSystemBrowser(FEEDBACK_URL),
       onClose: () => {

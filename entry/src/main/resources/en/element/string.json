@@ -287,6 +287,14 @@
     {
       "name": "toast_font_size_reset",
       "value": "Default font size restored"
+    },
+    {
+      "name": "settings_display_fix",
+      "value": "Display fixes"
+    },
+    {
+      "name": "settings_display_fix_desc",
+      "value": "Fixes unrendered formulas and broken table columns; off = page as-is"
     }
   ]
 }
