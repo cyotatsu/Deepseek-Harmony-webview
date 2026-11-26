@@ -8,7 +8,7 @@ import {
   decideOverlayDismissFallback
 } from '../main/ets/common/BackPolicy';
 import { OVERLAY_NONE, OVERLAY_DIALOG, OVERLAY_MENU, OVERLAY_CLOSABLE,
-  OVERLAY_PREVIEW, OVERLAY_CONFIRM }
+  OVERLAY_PREVIEW, OVERLAY_CONFIRM, OVERLAY_FLOAT }
   from '../main/ets/common/WebViewport';
 
 /**
@@ -61,6 +61,15 @@ export default function backPolicyTest() {
       // 二三级界面上弹层开着时同样优先关弹层
       expect(decideBackAction(new BackCtx(false, true, -1, true)))
         .assertEqual(BACK_ACTION_DISMISS_MODAL);
+    });
+
+    // 浮卡（.ds-floating-position-wrapper）：与菜单同路径——点掉它，不后退不退出
+    it('dismisses_floating_card_without_navigating', 0, () => {
+      expect(decideBackAction(new BackCtx(true, false, -1, false, OVERLAY_FLOAT)))
+        .assertEqual(BACK_ACTION_DISMISS_OVERLAY);
+      // 即使网页还有历史，也不能走网页后退（否则卡片在、会话却退了）
+      expect(decideBackAction(new BackCtx(true, true, -1, false, OVERLAY_FLOAT)))
+        .assertEqual(BACK_ACTION_DISMISS_OVERLAY);
     });
 
     it('prompts_before_exiting_from_chat_root', 0, () => {

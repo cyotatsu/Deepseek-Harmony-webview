@@ -1,6 +1,6 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { buildUserAgent, isMobileUa, buildViewportFixScript, buildResizeNotifyScript,
-  buildProbeScript, buildOverlayProbeScript, buildOverlayDismissScript, parseOverlayKind,
+  buildProbeScript, buildOverlayProbeScript, buildOverlayDismissScript, parseOverlayKind, OVERLAY_FLOAT,
   isDismissClicked, buildComposerAutoHideScript, buildKeyboardStateScript, buildRetryFocusScript,
   COMPOSER_HIDDEN_CLASS, EDITOR_CARD_CLASS, EDITOR_MAX_VAR, EDITOR_MAX_RATIO, EDITOR_MAX_PX,
   EDITOR_ACTION_ROW_CLASS, EDITOR_BOTTOM_PAD_VAR, EDITOR_IMAGE_MAX_VH, EDITOR_MIN_PX,
@@ -278,6 +278,10 @@ export default function webViewportTest() {
       expect(parseOverlayKind('0')).assertEqual(OVERLAY_NONE);
       expect(parseOverlayKind('true')).assertEqual(OVERLAY_NONE);
       expect(parseOverlayKind('undefined')).assertEqual(OVERLAY_NONE);
+      // 站点通用浮层容器（额度卡片这类锚定式浮卡）单独成类：
+      // 认出它才能让返回键「消费本次返回」，关不掉也不退化成网页后退
+      expect(parseOverlayKind('float')).assertEqual(OVERLAY_FLOAT);
+      expect(parseOverlayKind('"float|DIV||ds-floating-position-wra|349x322"')).assertEqual(OVERLAY_FLOAT);
       expect(parseOverlayKind('probe-error')).assertEqual(OVERLAY_NONE);
     });
 
@@ -574,6 +578,15 @@ export default function webViewportTest() {
       // 旧的按坐标取元素的做法必须已经去掉
       expect(script.indexOf('elementFromPoint') < 0).assertTrue();
       expect(script.indexOf('clicked-outside\'') < 0).assertTrue();
+    });
+
+    // 浮卡可能盖住视口中心：外部落点必须先校验「视口内 + 浮卡外」；
+    // 一个安全落点都没有时返回 no-safe-point，由调用方消费本次返回，
+    // 绝不退化成网页后退、也不盲点第二次
+    it('refuses_to_click_when_no_safe_point', 0, () => {
+      expect(script).assertContain('ds-floating-position-wrapper');
+      expect(script).assertContain('no-safe-point');
+      expect(script).assertContain('pointerEvents');
     });
 
     it('fires_real_pointer_events_with_coordinates', 0, () => {

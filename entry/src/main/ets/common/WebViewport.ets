@@ -1578,6 +1578,16 @@ export const OVERLAY_PREVIEW: string = 'preview';
 export const OVERLAY_CONFIRM: string = 'confirm';
 
 /**
+ * 站点通用浮层容器（`.ds-floating-position-wrapper`）：额度卡片、模型菜单等
+ * **锚定式浮卡**。它们没有 role=dialog / aria-modal / 关闭按钮，返回键既不能
+ * 后退（不进历史）也不能靠 DOM 关闭入口，只能「点外部」。
+ *
+ * 单独成类是为了让调用方知道：这一类**必须消费本次返回**——关闭失败也不能
+ * 在同一次返回里退化成网页后退（否则卡片还在、会话却退了）。
+ */
+export const OVERLAY_FLOAT: string = 'float';
+
+/**
  * 检测**网页自己的瞬时界面**是否开着，并指出是**哪一类**（供返回手势决策使用）。
  *
  * 为什么要分类，而不是只回答「开没开」：两类界面的关闭手段根本不同。
@@ -1732,6 +1742,31 @@ export function buildOverlayProbeScript(): string {
       for (i = 0; i < menus.length; i++) {
         if (visible(menus[i], 1, 1)) { return hit('${OVERLAY_MENU}', menus[i]); }
       }
+      // 2b) 站点的通用浮层容器：额度卡片这类「锚定式浮卡」没有 role/aria-modal，
+      //     只有 .ds-floating-position-wrapper（position:absolute + z-index 1000+）。
+      //     不认它就会一路落到 OVERLAY_NONE → 返回键变成网页后退/退出，而不是关卡片。
+      //
+      //     多个浮层同时存在时只关最上层一个：按 z-index 取最大，同层取 DOM 靠后的
+      //     （后插入的通常在上面）。DOM 顺序本身不代表视觉层级，所以不能取第一个。
+      var floats = document.querySelectorAll('.ds-floating-position-wrapper');
+      var bestFloat = null;
+      var bestZ = -1;
+      var vw2 = window.innerWidth || 0;
+      var vh2 = window.innerHeight || 0;
+      for (i = 0; i < floats.length; i++) {
+        var fe = floats[i];
+        if (!visible(fe, 80, 60)) { continue; }
+        var fs2 = window.getComputedStyle(fe);
+        if (!fs2) { continue; }
+        if (fs2.pointerEvents === 'none') { continue; }
+        var fz = Number(fs2.zIndex);
+        if (!(fz >= 100)) { continue; }
+        var fr2 = fe.getBoundingClientRect();
+        // 与视口相交才算数（旋转/分屏后可能被挪到视口外）
+        if (fr2.right <= 0 || fr2.bottom <= 0 || fr2.left >= vw2 || fr2.top >= vh2) { continue; }
+        if (fz >= bestZ) { bestZ = fz; bestFloat = fe; }
+      }
+      if (bestFloat) { return hit('${OVERLAY_FLOAT}', bestFloat); }
       // 3) 带「关闭 / 取消」入口的界面（多选 / 选择对话 / 分享选择等）
       var cands = document.querySelectorAll('[aria-label],[title]');
       for (i = 0; i < cands.length; i++) {
@@ -1773,7 +1808,7 @@ export function parseOverlayKind(raw: string, kindOnly: boolean = true): string 
     return v;
   }
   if (kind === OVERLAY_DIALOG || kind === OVERLAY_MENU || kind === OVERLAY_CLOSABLE ||
-    kind === OVERLAY_PREVIEW || kind === OVERLAY_CONFIRM) {
+    kind === OVERLAY_PREVIEW || kind === OVERLAY_CONFIRM || kind === OVERLAY_FLOAT) {
     return kind;
   }
   return OVERLAY_NONE;
@@ -1990,8 +2025,55 @@ export function buildOverlayDismissScript(): string {
       //    它的「收起侧栏」处理器不会触发 —— 菜单关闭而侧栏保持展开。
       var host = document.body || document.documentElement;
       if (!host) { return 'none:no-target'; }
-      var cx = Math.round((window.innerWidth || 2) / 2);
-      var cy = Math.round((window.innerHeight || 2) / 2);
+      var vw3 = window.innerWidth || 0;
+      var vh3 = window.innerHeight || 0;
+      var cx = Math.round(vw3 / 2);
+      var cy = Math.round(vh3 / 2);
+      // 浮卡（.ds-floating-position-wrapper）可能正好盖住视口中心：那样「点外部」
+      // 会点在浮卡自己身上，等于没点。这里按「视口内 + 浮卡外」筛候选点，
+      // 全部不满足时**不点**（返回 no-safe-point，由调用方消费本次返回），
+      // 绝不退化成网页后退，也不盲点第二次。
+      var topFloat = null;
+      var topZ = -1;
+      try {
+        var fl = document.querySelectorAll('.ds-floating-position-wrapper');
+        for (i = 0; i < fl.length; i++) {
+          if (!visible(fl[i], 80, 60)) { continue; }
+          var fcs = window.getComputedStyle(fl[i]);
+          if (!fcs || fcs.pointerEvents === 'none') { continue; }
+          var fzv = Number(fcs.zIndex);
+          if (!(fzv >= 100)) { continue; }
+          if (fzv >= topZ) { topZ = fzv; topFloat = fl[i]; }
+        }
+      } catch (e11) { }
+      if (topFloat) {
+        var tr = topFloat.getBoundingClientRect();
+        var pad = 8;
+        var cands2 = [
+          [Math.round(tr.left - 60), Math.round(tr.bottom - 40)],
+          [Math.round(tr.right + 60), Math.round(tr.bottom - 40)],
+          [Math.round(tr.left + 20), Math.round(tr.bottom + 48)],
+          [Math.round(tr.left + 20), Math.round(tr.top - 48)],
+          [12, 12],
+          [vw3 - 12, 12],
+          [12, vh3 - 12],
+          [vw3 - 12, vh3 - 12]
+        ];
+        for (var ci = 0; ci < cands2.length; ci++) {
+          var px2 = cands2[ci][0];
+          var py2 = cands2[ci][1];
+          if (px2 < 1 || py2 < 1 || px2 >= vw3 || py2 >= vh3) { continue; }
+          var outside = !(px2 >= tr.left - pad && px2 <= tr.right + pad &&
+            py2 >= tr.top - pad && py2 <= tr.bottom + pad);
+          if (!outside) { continue; }
+          // 注意：这里**不做坐标命中查询**。派发目标始终是 body，
+          // 坐标只用于给站点的「点外部」判定一个有意义的落点；
+          // 按坐标去找元素再点，正是会把抽屉遮罩一起收起的旧做法（有单测守着）。
+          fire(host, px2, py2);
+          return 'clicked-outside-body:' + px2 + ',' + py2;
+        }
+        return 'no-safe-point';
+      }
       fire(host, cx, cy);
       return 'clicked-outside-body';
     } catch (e) {
@@ -2474,8 +2556,12 @@ export function buildMathRepairScript(): string {
       var TAB = String.fromCharCode(9);
       var CMD = new RegExp(BS + BS + '[a-zA-Z]{2,}');
       var MARK = 'ds-math-fix';
-      // 渲染失败的文本节点按节点对象记账：同一节点只试一次，避免每轮重试同一批而饿死后面的公式。
-      if (!window.__dsMathFixFailed) { window.__dsMathFixFailed = new WeakSet(); }
+      // 渲染失败的文本节点按「节点 + 失败时的原文」记账：
+      // 流式回答里同一个文本节点的内容会不断变长（先半截、后完整），只按节点一次性封杀，
+      // 就会出现「流式期间渲染失败 → 消息结束后内容已经正确了，却永远不再尝试」——
+      // 用户看到的表现就是「这条公式要等下一轮对话才突然变正常」。
+      // 所以只在「文本没变」时才跳过，文本一变就重新试（失败会把新文本重新记上）。
+      if (!window.__dsMathFixFailed) { window.__dsMathFixFailed = new WeakMap(); }
       var FAILED = window.__dsMathFixFailed;
       function trim(s) {
         var a = 0;
@@ -2709,12 +2795,29 @@ export function buildMathRepairScript(): string {
         if (eAt >= 0) { out = out.substring(0, eAt) + out.substring(eAt + eTok.length); }
         return out;
       }
+      // 站点 Markdown 会把 left 后面那个转义花括号的反斜杠吃掉：
+      // 原文是 left 加反斜杠加左花括号，到了 DOM 里只剩 left 加左花括号。
+      // KaTeX 于是把那个花括号当成 left 的分组，一直等一个永远不来的右花括号，
+      // 报 Expected brace, got right（实机日志抓到过）。语法层面的修复，放最前面。
+      function fixLeftRightBraces(s0) {
+        var out = '';
+        var i = 0;
+        while (i < s0.length) {
+          if (s0.substring(i, i + 6) === BS + 'left{') { out += BS + 'left' + BS + '{'; i += 6; continue; }
+          if (s0.substring(i, i + 7) === BS + 'right}') { out += BS + 'right' + BS + '}'; i += 7; continue; }
+          out += s0.charAt(i);
+          i++;
+        }
+        return out;
+      }
       function candidates(tex) {
         var list = [];
         var add = function (t) { if (t && t.length > 0 && list.indexOf(t) < 0) { list.push(t); } };
         add(tex);
+        add(fixLeftRightBraces(tex));
         var s2 = stripDelims(tex);
         add(s2);
+        add(fixLeftRightBraces(stripDelims(tex)));
         s2 = stripMeta(s2);
         add(s2);
         s2 = removeWordAll(s2, 'middle');
@@ -3031,7 +3134,7 @@ export function buildMathRepairScript(): string {
           // 才敢整段替换，否则可能把一段普通文字换成公式排版。
           if ((isCmd || looksMath(tex)) && (isCmd || display)) {
             var html = render(tex, display);
-            if (!html) { FAILED.add(node); continue; }
+            if (!html) { FAILED.set(node, tex); continue; }
             var holder = document.createElement(display ? 'div' : 'span');
             holder.className = MARK;
             holder.innerHTML = html;
@@ -3060,7 +3163,11 @@ export function buildMathRepairScript(): string {
           var v = String(t.nodeValue || '');
           if (!looksMath(v)) { continue; }
           if (blocked(t.parentNode)) { continue; }
-          if (FAILED.has(t)) { continue; }
+          if (FAILED.has(t)) {
+            var seen = FAILED.get(t);
+            if (seen !== null && seen !== undefined && seen === stripStray(trim(v))) { continue; }
+            FAILED.delete(t);
+          }
           nodes.push(t);
           if (nodes.length >= 20) { break; }
         }
@@ -3118,7 +3225,14 @@ export function buildScrollFixScript(): string {
     + 'table.ds-tbl-fixed .katex-display{margin:0.2em 0}'
     // 异常表里的行内公式必须不可断行：white-space:normal 时浏览器会认为它能在任意位置折行，
     // 于是把列宽算得比公式实际宽度还窄，绘制时公式就压到右边那一列的文字上（实机现象）。
-    + 'table.ds-tbl-fixed td .katex,table.ds-tbl-fixed th .katex{white-space:nowrap !important}';
+    + 'table.ds-tbl-fixed td .katex,table.ds-tbl-fixed th .katex{white-space:nowrap !important}'
+    // 补渲染出来的公式块：继承段落 line-height 会把分数、根号、上下标压扁并相互重叠，
+    // 所以强制 line-height:normal；上下留白让行间公式和正文分开；padding 防止
+    // overflow-y:hidden 裁掉根号/下标的伸出行。
+    + 'div.ds-math-fix{display:block;text-align:center;margin:0.8em 0;padding:0.18em 0}'
+    + 'span.ds-math-fix{display:inline-block}'
+    + '.ds-math-fix{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}'
+    + '.ds-math-fix,.ds-math-fix .katex{line-height:normal !important}';
   (document.head || document.documentElement).appendChild(st);
   // 站点自己的表格样式里带了 width/min-width 的 !important，样式表压不过它，
   // 于是列宽被算窄、行内公式（KaTeX 不可断行）溢到右边那一列、与文字叠在一起。
@@ -3744,7 +3858,51 @@ export function buildTableRepairScript(): string {
   //   raw  : 站点留着未渲染的 LaTeX，而原文这边渲染成功
   //   frag : 站点以逗号/分号开头（被竖线切开的残片）
   //   cut  : 站点以等号结尾（后半截被切走）
+  // 只留「有意义的字符」：字母、数字、CJK。用来做顺序包含判断，
+  // 这样公式被渲染成 KaTeX 之后（\frac{1}{h'(y)} → h′(y)）也能和原文对上。
+  function lettersOf(el) {
+    var t = normCmp(visibleText(el));
+    var o = '';
+    for (var i = 0; i < t.length; i++) {
+      var ch = t.charAt(i);
+      var cc = t.charCodeAt(i);
+      if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122)) { o += ch; }
+      else if (cc >= 0x4e00 && cc <= 0x9fff) { o += ch; }
+    }
+    return o;
+  }
+  // 结构证明：站点把「一列」按竖线劈成了多列。
+  // 判据 = 同一行里 DOM 的单元格数 > 参考表该行单元格数（忠实渲染不可能变多），
+  // 且 DOM 这些碎片的字母序列能按顺序在参考行里逐段找到（证明碎片确实来自这一行，
+  // 不是别的表的巧合）。两条同时成立才算证明成立。
+  function splitProof(domTb, refTb) {
+    var dr = domTb.querySelectorAll('tr');
+    var rr = refTb.querySelectorAll('tr');
+    if (dr.length === 0 || rr.length !== dr.length) { return ''; }
+    for (var q = 0; q < dr.length; q++) {
+      var dcs = dr[q].querySelectorAll('td,th');
+      var rcs = rr[q].querySelectorAll('td,th');
+      if (dcs.length <= rcs.length) { continue; }
+      var refAll = lettersOf(rr[q]);
+      if (refAll === '') { continue; }
+      var cur = 0;
+      var okAll = true;
+      var hit = 0;
+      for (var w = 0; w < dcs.length; w++) {
+        var seg = lettersOf(dcs[w]);
+        if (seg === '') { continue; }
+        var at = refAll.indexOf(seg, cur);
+        if (at < 0) { okAll = false; break; }
+        cur = at + seg.length;
+        hit++;
+      }
+      if (okAll && hit >= 2) { return 'split'; }
+    }
+    return '';
+  }
   function damageProof(domTb, refTb) {
+    var sp = splitProof(domTb, refTb);
+    if (sp !== '') { return sp; }
     var dc = domTb.querySelectorAll('td,th');
     var rc = refTb.querySelectorAll('td,th');
     var n = dc.length < rc.length ? dc.length : rc.length;
@@ -3829,6 +3987,7 @@ export function buildTableRepairScript(): string {
   if (cands.length === 0 && need.length === 0) { return 'wait-md'; }
   var out2 = 'fixed=' + fixed + ' / mdv=' + String(window.__dsMdVersion || 0) +
     ' / histv=' + String(window.__dsHistVersion || 0);
+
   if (rejected > 0) { out2 += ' / rej=' + rejected; }
   if (need.length > 0) { out2 += ' / need=' + need.slice(0, 3).join(';'); }
   return out2;

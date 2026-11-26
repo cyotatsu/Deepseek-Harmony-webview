@@ -23,7 +23,7 @@ import { sanitizeFileName, buildDownloadTempPath, fileNameFromTempPath,
 import { ensurePermission, MICROPHONE_PERMISSION } from '../common/AppPermissions';
 import { buildUserAgent, buildViewportFixScript, buildResizeNotifyScript,
   buildProbeScript, buildOverlayProbeScript, buildOverlayDismissScript, buildOverlayCloseScript,
-  parseOverlayKind, OVERLAY_PREVIEW, OVERLAY_CONFIRM,
+  parseOverlayKind, OVERLAY_PREVIEW, OVERLAY_CONFIRM, OVERLAY_FLOAT,
   isDismissClicked, buildComposerAutoHideScript, buildKeyboardStateScript, buildRetryFocusScript,
   buildBaseFontProbeScript,
   buildPageThemeProbeScript,
@@ -1056,7 +1056,9 @@ struct Index {
     // 网页自己的瞬时界面（菜单 / 侧栏多选模式 / 无历史的弹窗）：点掉它。
     // 有历史的弹窗（系统设置）不走这里 —— 见 BackPolicy 中的说明。
     if (action === BACK_ACTION_DISMISS_OVERLAY) {
-      this.dismissWebOverlay();
+      // 浮卡（OVERLAY_FLOAT）在本次返回里必须被消费：即使「点外部」没成功，
+      // 也不能退化成本次返回去后退/退出 —— 那会变成「卡片还在、会话却退了」。
+      this.dismissWebOverlayWith('', webOverlay === OVERLAY_FLOAT);
       return;
     }
 
@@ -1114,7 +1116,7 @@ struct Index {
    *             否则用**预览 / 确认专用**脚本 —— 两者关闭策略不同：
    *             必须点遮罩空白或它自己的取消入口，且要避开图片本体。
    */
-  private dismissWebOverlayWith(kind: string): void {
+  private dismissWebOverlayWith(kind: string, consumeOnMiss: boolean = false): void {
     const script: string = kind === '' ? buildOverlayDismissScript() : buildOverlayCloseScript(kind);
     try {
       this.controller.runJavaScript(script)
@@ -1124,6 +1126,13 @@ struct Index {
           // 直接拿原文判断会把「点到了」误判成「没点到」
           if (kind === '') {
             if (!isDismissClicked(result)) {
+              if (consumeOnMiss) {
+                // 明确识别到浮卡：关闭没成功也把这次返回吃掉，保持页面不动，
+                // 让用户再按一次（下一次会重新探测、重新尝试）。
+                hilog.warn(DOMAIN, TAG,
+                  'Float overlay not closed, keep page: %{public}s', String(result));
+                return;
+              }
               // ⚠️ 必须降级，不能就此结束：onBackPress 已经把返回键消费掉了，
               // 若这里什么都不做，用户感知就是「返回失灵」（什么都点掉了但界面没变）。
               // 典型成因：判成 closable 的"取消/关闭"文字按钮并不在任何浮层容器内，
